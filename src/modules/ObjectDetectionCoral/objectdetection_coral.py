@@ -50,7 +50,7 @@ import tpu_runners
 from options import Options
 from tpu_runner import TPURunner
 
-tpu_runners = TPURunners()
+tpu_runners = TPURunner()
 
 
 def do_detect(options: Options, img: Image, score_threshold: float = 0.5):

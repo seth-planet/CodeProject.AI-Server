@@ -51,9 +51,14 @@ WARN_TEMPERATURE_THRESHOLD = 80
 MAX_WAIT_TIME = 60.0
 
 
-class TPURunners(object):
+class TPURunner(object):
 
     def __init__(self):
+        """
+        Init object and do a check for the temperature file. Right now
+        the temperature file would only be supported on Linux systems
+        with the TPU installed on the PCIe bus.
+        """
         # Refresh the interpreters once an hour
         interpreter_lifespan_secs = 3600
 
@@ -85,6 +90,20 @@ class TPURunners(object):
                     
                     
     def _post_service(self, r: pipeline.PipelinedModelRunner, q: queue.Queue):
+        """
+        A worker thread that loops to pull results from the pipelined model
+        runner and deliver them to the requesting thread's queue. This is the
+        main interface for receiving results from a pipeline runner.
+        
+        There are timeouts in the queues' usage here, but we don't expect them
+        to ever be blocked. The intention is so if anything starts going 'off
+        the rails' in regards to work syncronization, it blows up one of our
+        queues first instead of giving us a more difficult OOM or deadlock
+        condition.
+        
+        When a 'NOOP' is enqueued in the pipeline, it finishes its work and
+        shuts down. That condition is detected here and exits the thread.
+        """
         while True:
             # Get the next result from runner N
             rs = r.pop()
@@ -105,6 +124,32 @@ class TPURunners(object):
 
     # Must be called while holding runner_lock
     def _init_interpreters(self, options: Options) -> str:
+        """
+        Initializes the interpreters with the TFLite models.
+        
+        Also loads and initalizes the pipeline runners. To do this, it needs
+        to figure out if we're using segmented pipelines, if we can load all
+        the segments to the TPUs, and how to allocate them. For example, if
+        we have three TPUs and request a model that contains two segments,
+        we will load the two segments into two TPUs. If we have four TPUs
+        and load the same model, we will create two pipeline runners with
+        two segments each.
+        
+        We also kick off the 'postmen' here that are threads responsible for
+        transferring output from the pipeline to queues held by each thread
+        requesting infrence. These queues block until results are available
+        for the thread. The postmen and queues are necessary because otherwise
+        there would be no way of keeping track of which results align with
+        which incoming request.
+        
+        The postmen each have 'postboxes' that are queues that they deliver
+        results into. The next item in the postbox aligns with the next result
+        in the pipeline. The items in the postboxes are themselves queues. This
+        is because the thread requesting work is blocked waiting for a result
+        to be placed in each of these queues (it's the postman's responability
+        to make this transfer.) When the requesting thread's result is enqueued
+        it is unblocked and proceeds to process the results.
+        """
 
         self.interpreters = []
         self.runners = []
@@ -212,6 +257,22 @@ class TPURunners(object):
 
 
     def _periodic_check(self, options: Options):
+        """
+        Run a periodic check to ensure the temeratures are good and we don't
+        need to (re)initialize the interpreters/workers/pipelines. The system
+        is setup to refresh the TF interpreters once an hour.
+        
+        I suspect that many of the problems I saw reported with the use of the
+        Coral TPUs online were due to overheating chips. There were a few
+        comments along the lines of: "Works great, but after running for a bit
+        it became unstable and crashed. I had to back way off and it works fine
+        now!" This seems symptomatic of the TPU throttling itself as it heats
+        up, reducing its own workload, and giving unexpected results to the end
+        user.
+        """
+        # TODO: we could probably put a timer in here to only run this no more
+        # than every few seconds rather than every call.
+        
         # Check temperatures
         msg = "Core {} is {} Celsius and will likely be throttled"
         if self.temp_fname_format != None:
@@ -248,6 +309,10 @@ class TPURunners(object):
 
 
     def _delete(self):
+        """
+        Close and delete each of the pipelines and interpreters while flushing
+        existing work.
+        """
         # Close each of the pipelines
         for i in range(len(self.runners)):
             self.runners[i].push({})
@@ -271,6 +336,19 @@ class TPURunners(object):
                       options:Options,
                       image: Image,
                       score_threshold: float):
+        """
+        Execute all the default image processing operations.
+        
+        Will take an image and:
+        - Initialize TPU pipelines.
+        - Tile it.
+        - Normalize each tile.
+        - Run infrence on the tile.
+        - Collate results.
+        - Remove duplicate results.
+        - Return results as Objects.
+        - Return infrence timing.
+        """
 
         if not self._periodic_check(options):
             return False
@@ -387,6 +465,24 @@ class TPURunners(object):
 
 
     def _get_tiles(self, options:Options, image: Image):
+        """
+        Returns an iterator that yields image tiles and associated location.
+        
+        For tiling, we use the philosophy that it makes the most sense to
+        keep the pixel downsampling multiplier somewhat constant and resample
+        the image to fit multiples of the tensor input dimensions. The default
+        option is a multiplier of roughly 6, which should give us two tiles for
+        an image with HD or 4k dimensions. Anything larger or more
+        square-shaped will be mapped to just be a single tile. This is
+        intentionally kept conservative. To tile more agressively, reduce the
+        multiplier down from 6. Run time will go up, as the number of
+        inferences will go up with more tiles.
+        
+        Also normalizes each tile after it's chopped out. This is experimental
+        and if it doesn't yield better results, should be dropped from the
+        code. It would be particularly interesting to see how this affects
+        night imagery.
+        """
         _, m_height, m_width, _ = self.get_input_details()['shape']
         i_width, i_height = image.size
 
