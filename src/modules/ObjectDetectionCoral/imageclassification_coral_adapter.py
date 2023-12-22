@@ -63,23 +63,8 @@ class CoralClassifier_adapter(ModuleRunner):
         start_process_time = time.perf_counter()
     
         try:
-        
-            # An attempt to fix "RuntimeError: There is at least 1 reference to 
-            # internal data in the interpreter in the form of a numpy array or 
-            # slice. Be sure to only hold the function returned from tensor() if
-            # you are using raw data access.
-            if not sem.acquire(timeout=1):
-                return {
-                    "success"     : False,
-                    "predictions" : [],
-                    "message"     : "The interpreter is in use. Please try again later",
-                    "count"       : 0,
-                    "processMs"   : int((time.perf_counter() - start_process_time) * 1000),
-                    "inferenceMs" : 0
-                }
 
             result = do_classify(opts, img, score_threshold)
-            sem.release()
 
             if not result['success']:
                 return {

@@ -1,6 +1,6 @@
 #! Python3.7
 
-Pillow>=4.0.0               # Installing Pillow, a Python Image Library
+Pillow>=4.3.0               # Installing Pillow, a Python Image Library
 
 # Versions 2.11 - 2.13 can be found at https://github.com/NexelOfficial/tflite-runtime-win
 tflite-runtime==2.5.0.post1 # Installing Tensorflow Lite

@@ -24,6 +24,16 @@ pythonVersion=3.9
 setupPython
 installPythonPackages
 
+# Install optimized Pillow-SIMD or fallback to keeping regular Pillow
+# Used for fast image image resizing operations with SSE4 or AVX2
+# See also: https://python-pillow.org/pillow-perf/
+{
+    pip uninstall --yes pillow &&
+    pip install pillow-simd
+} || {
+    pip uninstall --yes pillow-simd &&
+    pip install pillow
+}
 
 # Now the supporting libraries
 if [ "${systemName}" == "Raspberry Pi" ] || [ "${systemName}" == "Orange Pi" ] || \

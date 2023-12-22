@@ -36,123 +36,23 @@ python.exe coral\pycoral\examples\classify_image.py --model coral\pycoral\test_d
 
 
 """
-import os
-import platform
 import sys
 
 import argparse
-from datetime import datetime
 import time
 
 import numpy as np
+
 from PIL import Image
+from PIL import ImageDraw
 
-# For Linux we have installed the pycoral libs via apt-get, not PIP in the venv,
-# So make sure the interpreter can find the coral libraries
-if platform.system() == "Linux":
-    sys.path.insert(0, "/usr/lib/python3.9/site-packages/")
-
-from pycoral.adapters import common
-from pycoral.adapters import detect
-from pycoral.utils.dataset import read_label_file
-from pycoral.utils.edgetpu import make_interpreter
-
-interpreter_lifespan_secs = 3600  # Refresh the interpreter once an hour
-
-interpreter         = None  # The model interpreter
-interpreter_created = None  # When was the interpreter created?
-labels              = None  # set of labels for this model
-
-
+import tpu_runners
 from options import Options
 
-def init_detect(options: Options) -> str:
+tpu_runners = TPURunners()
 
-    global interpreter
-    global interpreter_created
-    global labels
-
-
-    # edge_tpu   = options.support_GPU # Assuming this correctly tests for Coral TPU
-    # model_file = options.model_tpu_file if edge_tpu else options.model_cpu_file
-   
-    # Read labels
-    labels = read_label_file(options.label_file) if options.label_file else {}
-
-    # Initialize TF-Lite interpreter.
-    device = ""
-    try:
-        device = "tpu"
-        interpreter = make_interpreter(options.model_tpu_file, device=None, delegate=None)
-
-        if interpreter == None:
-            device = "cpu"
-            interpreter = make_interpreter(options.model_cpu_file, device="cpu", delegate=None)
-
-    except Exception as ex:
-        try:
-            print("Unable to find or initialise the Coral TPU. Falling back to CPU-only.")
-            
-            device = "cpu"
-            interpreter = make_interpreter(options.model_cpu_file, device="cpu", delegate=None)
-        except Exception as ex:
-            print("Error creating interpreter: " + str(ex))
-            interpreter = None
-
-    if interpreter == None:
-        device = ""
-    else:
-        interpreter.allocate_tensors()
-        interpreter_created = datetime.now()
-
-        """
-        # Model must be uint8 quantized
-        if common.input_details(interpreter, 'dtype') != np.uint8:
-            raise ValueError('Only support uint8 input type.')
-        """
-
-        # Get input and output tensors.
-        input_details  = interpreter.get_input_details()
-        output_details = interpreter.get_output_details()
-
-        print(f"Debug: Input details: {input_details[0]}\n")
-        print(f"Debug: Output details: {output_details[0]}\n")
-
-    return device
 
 def do_detect(options: Options, img: Image, score_threshold: float = 0.5):
-
-    global interpreter
-    global interpreter_created
-
-    mean  = 128 # args.input_mean
-    std   = 128 # args.input_std
-    top_k = 1
-
-    # Once an hour, refresh the interpreter
-    if interpreter != None:
-        seconds_since_created = (datetime.now() - interpreter_created).total_seconds()
-        if seconds_since_created > interpreter_lifespan_secs:
-            print("Info: Refreshing the Tensorflow Interpreter")
-            interpreter = None
-
-    if interpreter == None:
-        init_detect(options)
-
-    if interpreter == None:
-        return {
-            "success"     : False,
-            "error"       : "Unable to create interpreter",
-            "count"       : 0,
-            "predictions" : [],
-            "inferenceMs" : 0
-        }
-
-    w,h = img.size
-    # print("Debug: Input(height, width): ", h, w)
-
-    _, scale = common.set_resized_input(
-        interpreter, img.size, lambda size: img.resize(size, Image.LANCZOS))
 
     """
     size = common.input_size(interpreter)
@@ -187,18 +87,21 @@ def do_detect(options: Options, img: Image, score_threshold: float = 0.5):
     """
 
     # Run inference
-    start_inference_time = time.perf_counter()
-    interpreter.invoke()
-    inferenceMs = int((time.perf_counter() - start_inference_time) * 1000)
+    inference_rs = tpu_runners.process_image(options, image, score_threshold)
+    if inference_rs == False:
+        return {
+            "success"     : False,
+            "error"       : "Unable to create interpreter",
+            "count"       : 0,
+            "predictions" : [],
+            "inferenceMs" : 0
+        }
 
     # Get output
-    outputs = []
-    objs = detect.get_objects(interpreter, score_threshold, scale)
-    for obj in objs:
+    for obj in inference_rs[0]:
         class_id = obj.id
         caption  = labels.get(class_id, class_id)
         score    = float(obj.score)
-        # ymin, xmin, ymax, xmax = obj.bbox
         xmin, ymin, xmax, ymax = obj.bbox
 
         if score >= score_threshold:
@@ -217,11 +120,8 @@ def do_detect(options: Options, img: Image, score_threshold: float = 0.5):
         "success"     : True,
         "count"       : len(outputs),
         "predictions" : outputs,
-        "inferenceMs" : inferenceMs
+        "inferenceMs" : inference_rs[1]
     }
-
-from PIL import Image
-from PIL import ImageDraw
 
 def draw_objects(draw, objs, labels):
   """Draws the bounding box and label for each object."""
@@ -250,7 +150,7 @@ def main():
   args = parser.parse_args()
 
   labels = read_label_file(args.labels) if args.labels else {}
-  interpreter = make_interpreter(args.model)
+  interpreters = make_interpreter(args.model)
   interpreter.allocate_tensors()
 
   image = Image.open(args.input)
