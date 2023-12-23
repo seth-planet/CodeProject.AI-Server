@@ -70,7 +70,7 @@ class TPURunner(object):
         # Refresh the interpreters once an hour
         self.interpreter_lifespan_secs = 3600
 
-        self.interpreters        = None  # The model interpreters
+        self.interpreters        = []    # The model interpreters
         self.interpreter_created = None  # When were the interpreters created?
         self.labels              = None  # set of labels for this model
         self.runners             = None  # Pipeline(s) to run the model
@@ -102,7 +102,7 @@ class TPURunner(object):
         logging.debug("Unable to find a temperature file")
                     
                     
-    def _post_service(self, r: pipeline.PipelinedModelRunner, q: queue.Queue):
+    def _post_service(self, r, q: queue.Queue):
         """
         A worker thread that loops to pull results from the pipelined model
         runner and deliver them to the requesting thread's queue. This is the
@@ -175,7 +175,6 @@ class TPURunner(object):
         tpu_count *= segment_count
        
         # Read labels
-        self.labels = None
         self.labels = read_label_file(options.label_file) \
                                                 if options.label_file else {}
         

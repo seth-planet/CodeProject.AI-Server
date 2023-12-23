@@ -5,6 +5,7 @@ try:
     from module_options import ModuleOptions
 except ImportError:
     logging.warning("Unable to import ModuleOptions, running with defaults")
+    ModuleOptions = None
 
 class Settings:
     def __init__(self, resolution, std_model_name, tpu_model_name, labels_name, tpu_segment_names):
@@ -44,27 +45,27 @@ class Options:
             "small": Settings(384,  'efficientdet_lite1_384_ptq.tflite',
                                     'efficientdet_lite1_384_ptq_edgetpu.tflite',
                                     'coco_labels.txt',
-                                    None),
+                                    []),
             '''
             # Small: SSD MobileDet      90 objects, COCO 320x320x3    TF-lite v2    9.1 ms      32.9% mAP
             # This seems redundant with 'small', but faster
             "small": Settings(320,  'ssdlite_mobiledet_coco_qat_postprocess.tflite',
                                     'ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite',
                                     'coco_labels.txt',
-                                    None),'''
+                                    []),'''
             '''
             # Small: SSD MobileNet V2   90 objects, COCO 300x300x3    TF-lite v2    7.6 ms      22.4% mAP
             # This seems redundant with 'tiny' but lower precision
             "small": Settings(300,  'tf2_ssd_mobilenet_v2_coco17_ptq.tflite',
                                     'tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite',
                                     'coco_labels.txt',
-                                    None),'''
+                                    []),'''
 
             # Tiny: MobileNet V2            90 objects, COCO 300x300x3    TF-lite v2    7.3 ms      25.6% mAP
             "tiny": Settings(300,   'ssd_mobilenet_v2_coco_quant_postprocess.tflite',
                                     'ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite',
                                     'coco_labels.txt',
-                                    None),
+                                    []),
         }
 
         self.NUM_THREADS    = 1
@@ -76,6 +77,8 @@ class Options:
         self._show_env_variables = True
 
         self.model_size = "Small"
+        self.module_path = "."
+        self.models_dir = "."
         if ModuleOptions:
             self.module_path    = ModuleOptions.module_path
             self.models_dir     = os.path.normpath(ModuleOptions.getEnvVariable("MODELS_DIR", f"{self.module_path}/assets"))

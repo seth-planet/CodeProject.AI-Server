@@ -60,7 +60,7 @@ def draw_objects(draw, objs, labels):
 def main():
   parser = argparse.ArgumentParser(
       formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument('-m', '--model', required=True,
+  parser.add_argument('-m', '--model', required=True, nargs='+',
                       help='File path of .tflite file')
   parser.add_argument('-i', '--input', required=True,
                       help='File path of image to process')
@@ -73,6 +73,13 @@ def main():
                       help='Number of times to run inference')
   args = parser.parse_args()
 
+  options = Options()
+  if len(args.model) > 1:
+    options.tpu_segment_names = args.model
+  else:
+    options.model_cpu_file = args.model[0]
+    options.model_tpu_file = args.model[0]
+  
   labels = read_label_file(args.labels) if args.labels else {}
 
   image = Image.open(args.input)
@@ -83,7 +90,7 @@ def main():
         
   for _ in range(args.count):
     start = time.perf_counter()
-    objs = tpu_runner.process_image(Options(), image, args.threshold)
+    objs = tpu_runner.process_image(options, image, args.threshold)
     inference_time = time.perf_counter() - start
     print('%.2f ms' % (inference_time * 1000))
 
