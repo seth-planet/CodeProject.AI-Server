@@ -17,9 +17,7 @@ import threading
 import os
 import time
 import logging
-import copy
 import multiprocessing
-import importlib
 import queue
 
 from datetime import datetime
@@ -32,13 +30,14 @@ from PIL import Image
 #if platform.system() == "Linux":
 #    sys.path.insert(0, "/usr/lib/python3.9/site-packages/")
 
-from pycoral.adapters import common
 from pycoral.utils.dataset import read_label_file
 from pycoral.utils.edgetpu import make_interpreter
 from pycoral.utils.edgetpu import list_edge_tpus
 import pycoral.pipeline.pipelined_model_runner as pipeline
+from pycoral.adapters import detect
 
 from options import Options
+
 
 
 INTERPRETER_LIFESPAN_SECONDS = 3600  # Refresh the interpreters once an hour
@@ -64,20 +63,20 @@ class TPURunner(object):
         with the TPU installed on the PCIe bus.
         """
         # Refresh the interpreters once an hour
-        interpreter_lifespan_secs = 3600
+        self.interpreter_lifespan_secs = 3600
 
-        interpreters        = None  # The model interpreters
-        interpreter_created = None  # When were the interpreters created?
-        labels              = None  # set of labels for this model
-        runners             = None  # Pipeline(s) to run the model
+        self.interpreters        = None  # The model interpreters
+        self.interpreter_created = None  # When were the interpreters created?
+        self.labels              = None  # set of labels for this model
+        self.runners             = None  # Pipeline(s) to run the model
 
-        next_runner_idx     = 0     # Which runner to execute on next?
-        postboxes           = None # Store output
-        postmen             = None
-        runner_lock         = threading.Lock()
-        mp_pool             = None
+        self.next_runner_idx     = 0     # Which runner to execute on next?
+        self.postboxes           = None # Store output
+        self.postmen             = None
+        self.runner_lock         = threading.Lock()
+        self.mp_pool             = None
         
-        last_check_timer    = None
+        self.last_check_timer    = None
 
         logging.info("{} version: {}".format(Image.__name__, Image.__version__))
 
@@ -93,7 +92,7 @@ class TPURunner(object):
             for i in tpu_count:
                 if os.path.exists(fn.format(i)):
                     self.temp_fname_format = fn
-                    logging.info(f"Found temperature file at: "+fn.format(i))
+                    logging.info("Found temperature file at: "+fn.format(i))
                     return
         logging.debug("Unable to find a temperature file")
                     
@@ -161,10 +160,10 @@ class TPURunner(object):
 
         self.interpreters = []
         self.runners = []
-        self.segment_count = max(1, len(options.tpu_segment_files))
+        segment_count = max(1, len(options.tpu_segment_files))
 
-        if mp_pool is None:
-            mp_pool = multiprocessing.Pool(processes=options.resize_processes)
+        if self.mp_pool is None:
+            self.mp_pool = multiprocessing.Pool(processes=options.resize_processes)
 
         # Only allocate the TPUs we will use
         tpu_count = len(list_edge_tpus()) # segment_count
@@ -188,14 +187,14 @@ class TPURunner(object):
                 else:
                     tpu_segment_file = options.model_tpu_file
                 
-                interpreters.append(make_interpreter(
+                self.interpreters.append(make_interpreter(
                                             tpu_segment_file,
                                             device=":{}".format(i),
                                             delegate=None))
             logging.debug("Loaded {} TPUs".format(tpu_count))
 
             # Fallback to CPU
-            if not any(interpreters):
+            if not any(self.interpreters):
                 segment_count = 1
                 device = "cpu"
                 self.interpreters = [make_interpreter(
@@ -203,7 +202,7 @@ class TPURunner(object):
                                         device="cpu",
                                         delegate=None)]
 
-        except Exception as ex:
+        except Exception:
             try:
                 logging.exception(
                     "CAUGHT EXCEPTION: Unable to find or initialize the "
@@ -293,8 +292,8 @@ class TPURunner(object):
         msg = "Core {} is {} Celsius and will likely be throttled"
         if self.temp_fname_format != None:
             for i in len(self.interpreters):
-                if os.path.exists(fn.format(i)):
-                    with open(fn.format(i), "r") as fp:
+                if os.path.exists(self.temp_fname_format.format(i)):
+                    with open(self.temp_fname_format.format(i), "r") as fp:
                         # Convert from milidegree C to degree C
                         temp = int(fp.read()) // 1000
                         
@@ -306,7 +305,7 @@ class TPURunner(object):
             seconds_since_created = \
                 (now_ts - self.interpreter_created).total_seconds()
                 
-            if seconds_since_created > interpreter_lifespan_secs:
+            if seconds_since_created > self.interpreter_lifespan_secs:
                 logging.info("Refreshing the Tensorflow Interpreters")
 
                 # Close all existing work before destroying...
@@ -532,10 +531,10 @@ class TPURunner(object):
         # Do chunking
         for x_off in range(0, resamp_x, m_width - options.tile_overlap):
             for y_off in range(0, resamp_y, m_height - options.tile_overlap):
-                cropped_arr = crop((x_off,
-                                    y_off,
-                                    x_off + m_width,
-                                    y_off + m_height)).asarray()
+                cropped_arr = resamp_img.crop((x_off,
+                                               y_off,
+                                               x_off + m_width,
+                                               y_off + m_height)).asarray()
                 logging.debug("Resampled image tile {}".format(cropped_arr.size))
             
                 # Normalize input image
@@ -595,8 +594,8 @@ class TPURunner(object):
         # Run resizing and tiling off the main thread. It'll take a while
         # and we don't want to block.
         q = multiprocessing.SimpleQueue()
-        mp_pool.apply_async(self._resize_and_chop_tiles,
-                            (options, image, q, m_width, m_height))
+        self.mp_pool.apply_async(self._resize_and_chop_tiles,
+                                 (options, image, q, m_width, m_height))
 
         # Return the tiles as they become available
         while True:
