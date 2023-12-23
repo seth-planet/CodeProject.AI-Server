@@ -1,7 +1,5 @@
-# Import our general libraries
 import sys
 import time
-import threading
 
 # Import the CodeProject.AI SDK. This will add to the PATH var for future imports
 sys.path.append("../../SDK/Python")
@@ -13,11 +11,50 @@ from module_runner import ModuleRunner
 from options import Options
 from PIL import UnidentifiedImageError, Image
 
-# Import the method of the module we're wrapping
-from objectdetection_coral import init_detect, do_detect
+from tpu_runner import TPURunner
 
 opts = Options()
-sem = threading.Semaphore()
+tpu_runner = TPURunner()
+
+def do_detect(options: Options, image: Image, score_threshold: float = 0.5):
+    # Run inference
+    inference_rs = tpu_runner.process_image(options, image, score_threshold)
+
+    if inference_rs == False:
+        return {
+            "success"     : False,
+            "error"       : "Unable to create interpreter",
+            "count"       : 0,
+            "predictions" : [],
+            "inferenceMs" : 0
+        }
+
+    # Get output
+    outputs = []
+    for obj in inference_rs:
+        class_id = obj.id
+        caption  = tpu_runner.labels.get(class_id, class_id)
+        score    = float(obj.score)
+        xmin, ymin, xmax, ymax = obj.bbox
+
+        if score >= score_threshold:
+            detection = {
+                "confidence": score,
+                "label": caption,
+                "x_min": xmin,
+                "y_min": ymin,
+                "x_max": xmax,
+                "y_max": ymax,
+            }
+
+            outputs.append(detection)
+
+    return {
+        "success"     : True,
+        "count"       : len(outputs),
+        "predictions" : outputs,
+        "inferenceMs" : inference_rs[1]
+    }
 
 class CoralObjectDetector_adapter(ModuleRunner):
 
@@ -36,7 +73,7 @@ class CoralObjectDetector_adapter(ModuleRunner):
             print("Edge TPU detected")
             self.execution_provider = "TPU"
 
-        device = init_detect(opts)
+        device = tpu_runner.init_interpreters(opts)
         if device.upper() == "TPU":
             self.execution_provider = "TPU"
         else:
@@ -54,7 +91,6 @@ class CoralObjectDetector_adapter(ModuleRunner):
             threshold: float  = float(data.get_value("min_confidence", opts.min_confidence))
             img: Image        = data.get_image(0)
 
-            # response = await self.do_detection(img, threshold)
             response = self.do_detection(img, threshold)
         else:
             # await self.report_error_async(None, __file__, f"Unknown command {data.command}")

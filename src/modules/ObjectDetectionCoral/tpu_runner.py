@@ -19,6 +19,8 @@ import time
 import logging
 import multiprocessing
 import queue
+import platform
+import sys
 
 from datetime import datetime
 
@@ -27,8 +29,8 @@ from PIL import Image
 
 # For Linux we have installed the pycoral libs via apt-get, not PIP in the venv,
 # So make sure the interpreters can find the coral libraries
-#if platform.system() == "Linux":
-#    sys.path.insert(0, "/usr/lib/python3.9/site-packages/")
+if platform.system() == "Linux":
+    sys.path.insert(0, "/usr/lib/python3.9/site-packages/")
 
 from pycoral.utils.dataset import read_label_file
 from pycoral.utils.edgetpu import make_interpreter
@@ -39,11 +41,13 @@ from pycoral.adapters import detect
 from options import Options
 
 
-
 INTERPRETER_LIFESPAN_SECONDS = 3600  # Refresh the interpreters once an hour
 
-# Don't let these fill indefinitely until something more unexpected goes wrong.
-# 1000 is arbitrarily chosen to block before things get ugly.
+# Don't let the queues fill indefinitely until something more unexpected goes
+# wrong. 1000 is arbitrarily chosen to block before things get ugly.
+# It also implies that there are many threads calling into here and waiting on
+# results. Our max queue lengths should never be more than
+# calling_threads * tiles_per_image.
 MAX_PIPELINE_QUEUE_LEN = 1000
 
 # Warn if any TPU reads above this temperature C
@@ -51,6 +55,7 @@ MAX_PIPELINE_QUEUE_LEN = 1000
 WARN_TEMPERATURE_THRESHOLD = 80
 
 # Nothing should ever sit in a queue longer than this many seconds.
+# 60 seconds is arbitrarily chosen to throw an error eventually.
 MAX_WAIT_TIME = 60.0
 
 
@@ -129,8 +134,8 @@ class TPURunner(object):
             q.get(timeout=MAX_WAIT_TIME).put(rs, timeout=MAX_WAIT_TIME)
 
 
-    # Must be called while holding runner_lock
-    def _init_interpreters(self, options: Options) -> str:
+    # Should be called while holding runner_lock (if called at run time)
+    def init_interpreters(self, options: Options) -> str:
         """
         Initializes the interpreters with the TFLite models.
         
@@ -313,12 +318,12 @@ class TPURunner(object):
                     self._delete()
                     
                     # Re-init while we still have the lock
-                    self._init_interpreters(options)
+                    self.init_interpreters(options)
 
         # (Re)start them if needed
         if not any(self.interpreters):
             with self.runner_lock:
-                self._init_interpreters(options)
+                self.init_interpreters(options)
 
         return any(self.interpreters)
 
@@ -583,6 +588,7 @@ class TPURunner(object):
         
         It makes more sense to me to split the image in two; resulting in two
         tiles that are each neither very warped or have wasted input pixels.
+        The downside is, of course, that we are doing twice as much work.
         
         Also normalizes each tile after it's chopped out. This is experimental
         and if it doesn't yield better results, should be dropped from the

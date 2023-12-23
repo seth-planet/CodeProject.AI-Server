@@ -32,16 +32,9 @@ Running this directly from src\runtimes\bin\windows\python37:
 
 cd \src\runtimes\bin\windows\python37
 python.exe coral\pycoral\examples\classify_image.py --model coral\pycoral\test_data\mobilenet_v2_1.0_224_inat_bird_quant.tflite --labels coral\pycoral\test_data\inat_bird_labels.txt --input coral\pycoral\test_data\parrot.jpg
-
-
-
 """
-import sys
-
 import argparse
 import time
-
-import numpy as np
 
 from PIL import Image
 from PIL import ImageDraw
@@ -49,79 +42,10 @@ from PIL import ImageDraw
 from options import Options
 from tpu_runner import TPURunner
 
+from pycoral.utils.dataset import read_label_file
+
 tpu_runner = TPURunner()
 
-
-def do_detect(options: Options, img: Image, score_threshold: float = 0.5):
-
-    """
-    size = common.input_size(interpreter)
-    resize_im = img.convert('RGB').resize(size, Image.ANTIALIAS)
-
-    # numpy_image = np.array(img)
-    # input_im = cv2.cvtColor(numpy_image, cv2.COLOR_BGR2RGB)
-    # resize_im = cv2.resize(input_im, size)
-
-    # Image data must go through two transforms before running inference:
-    #   1. normalization: f = (input - mean) / std
-    #   2. quantization: q = f / scale + zero_point
-    # The following code combines the two steps as such:
-    #   q = (input - mean) / (std * scale) + zero_point
-    # However, if std * scale equals 1, and mean - zero_point equals 0, the input
-    # does not need any preprocessing (but in practice, even if the results are
-    # very close to 1 and 0, it is probably okay to skip preprocessing for better
-    # efficiency; we use 1e-5 below instead of absolute zero).
-
-    params     = common.input_details(interpreter, 'quantization_parameters')
-    scale      = params['scales']
-    zero_point = params['zero_points']
-
-    if abs(scale * std - 1) < 1e-5 and abs(mean - zero_point) < 1e-5:
-        # Input data does not require preprocessing.
-        common.set_input(interpreter, resize_im)
-    else:
-        # Input data requires preprocessing
-        normalized_input = (np.asarray(resize_im) - mean) / (std * scale) + zero_point
-        np.clip(normalized_input, 0, 255, out=normalized_input)
-        common.set_input(interpreter, normalized_input.astype(np.uint8))
-    """
-
-    # Run inference
-    inference_rs = tpu_runner.process_image(options, image, score_threshold)
-    if inference_rs == False:
-        return {
-            "success"     : False,
-            "error"       : "Unable to create interpreter",
-            "count"       : 0,
-            "predictions" : [],
-            "inferenceMs" : 0
-        }
-
-    # Get output
-    for obj in inference_rs[0]:
-        class_id = obj.id
-        caption  = labels.get(class_id, class_id)
-        score    = float(obj.score)
-        xmin, ymin, xmax, ymax = obj.bbox
-
-        if score >= score_threshold:
-            detection = {
-                "confidence": score,
-                "label": caption,
-                "x_min": xmin,
-                "y_min": ymin,
-                "x_max": xmax,
-                "y_max": ymax,
-            }
-
-            outputs.append(detection)
-
-    return {
-        "success"     : True,
-        "count"       : len(outputs),
-        "predictions" : outputs,
-        "inferenceMs" : inference_rs[1]
-    }
 
 def draw_objects(draw, objs, labels):
   """Draws the bounding box and label for each object."""
@@ -156,9 +80,10 @@ def main():
   print('----INFERENCE TIME----')
   print('Note: The first inference is slow because it includes',
         'loading the model into Edge TPU memory.')
+        
   for _ in range(args.count):
     start = time.perf_counter()
-    do_detect(Options(), image)
+    objs = tpu_runner.process_image(Options(), image, args.threshold)
     inference_time = time.perf_counter() - start
     print('%.2f ms' % (inference_time * 1000))
 

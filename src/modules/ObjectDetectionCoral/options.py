@@ -1,5 +1,10 @@
 import os
-from module_options import ModuleOptions
+import logging
+
+try:
+    from module_options import ModuleOptions
+except ImportError:
+    logging.warning("Unable to import ModuleOptions, running with defaults")
 
 class Settings:
     def __init__(self, resolution, std_model_name, tpu_model_name, labels_name, tpu_segment_names):
@@ -70,14 +75,16 @@ class Options:
 
         self._show_env_variables = True
 
-        self.module_path    = ModuleOptions.module_path
-        self.models_dir     = os.path.normpath(ModuleOptions.getEnvVariable("MODELS_DIR", f"{self.module_path}/assets"))
-        self.model_size     = ModuleOptions.getEnvVariable("MODEL_SIZE", "Small")   # small, medium, large
+        self.model_size = "Small"
+        if ModuleOptions:
+            self.module_path    = ModuleOptions.module_path
+            self.models_dir     = os.path.normpath(ModuleOptions.getEnvVariable("MODELS_DIR", f"{self.module_path}/assets"))
+            self.model_size     = ModuleOptions.getEnvVariable("MODEL_SIZE", "Small")   # small, medium, large
 
-        # custom_models_dir = os.path.normpath(ModuleOptions.getEnvVariable("CUSTOM_MODELS_DIR", f"{module_path}/custom-models"))
+            # custom_models_dir = os.path.normpath(ModuleOptions.getEnvVariable("CUSTOM_MODELS_DIR", f"{module_path}/custom-models"))
 
-        self.num_threads    = int(ModuleOptions.getEnvVariable("NUM_THREADS",      self.NUM_THREADS))
-        self.min_confidence = float(ModuleOptions.getEnvVariable("MIN_CONFIDENCE", self.MIN_CONFIDENCE))
+            self.num_threads    = int(ModuleOptions.getEnvVariable("NUM_THREADS",      self.NUM_THREADS))
+            self.min_confidence = float(ModuleOptions.getEnvVariable("MIN_CONFIDENCE", self.MIN_CONFIDENCE))
 
         self.sleep_time     = 0.01
         
