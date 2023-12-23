@@ -18,10 +18,14 @@ import os
 import time
 import logging
 import copy
+import multiprocessing
+import importlib
+import queue
 
 from datetime import datetime
 
 import numpy as np
+from PIL import Image
 
 # For Linux we have installed the pycoral libs via apt-get, not PIP in the venv,
 # So make sure the interpreters can find the coral libraries
@@ -71,22 +75,27 @@ class TPURunner(object):
         postboxes           = None # Store output
         postmen             = None
         runner_lock         = threading.Lock()
+        mp_pool             = None
         
+        last_check_timer    = None
+
+        logging.info("{} version: {}".format(Image.__name__, Image.__version__))
 
         # Find the temperature file
         # https://coral.ai/docs/pcie-parameters/
         temp_fname_formats = ['/dev/apex_{}/temp',
                               '/sys/class/apex/apex_{}/temp']
         self.temp_fname_format = None
+
         tpu_count = len(list_edge_tpus())
 
         for fn in temp_fname_formats:
             for i in tpu_count:
                 if os.path.exists(fn.format(i)):
                     self.temp_fname_format = fn
-                    logging.debug(f"Found temperature file at :"+fn.format(i))
+                    logging.info(f"Found temperature file at: "+fn.format(i))
                     return
-        logging.debug("Unable to find temperature file")
+        logging.debug("Unable to find a temperature file")
                     
                     
     def _post_service(self, r: pipeline.PipelinedModelRunner, q: queue.Queue):
@@ -118,8 +127,7 @@ class TPURunner(object):
             # We may need to use copy.copy(rs) here if we see:
             # RuntimeError: There is at least 1 reference to internal data...
             # But I think the use of runners will be enough to fix the problem.
-            q.get(timeout=MAX_WAIT_TIME).put(rs,
-                                             timeout=MAX_WAIT_TIME)
+            q.get(timeout=MAX_WAIT_TIME).put(rs, timeout=MAX_WAIT_TIME)
 
 
     # Must be called while holding runner_lock
@@ -154,7 +162,10 @@ class TPURunner(object):
         self.interpreters = []
         self.runners = []
         self.segment_count = max(1, len(options.tpu_segment_files))
-        
+
+        if mp_pool is None:
+            mp_pool = multiprocessing.Pool(processes=options.resize_processes)
+
         # Only allocate the TPUs we will use
         tpu_count = len(list_edge_tpus()) # segment_count
         tpu_count *= segment_count
@@ -163,7 +174,7 @@ class TPURunner(object):
         self.labels = None
         self.labels = read_label_file(options.label_file) \
                                                 if options.label_file else {}
-
+        
         # Initialize TF-Lite interpreters.
         device = ""
         try:
@@ -232,7 +243,7 @@ class TPURunner(object):
         self.postboxs = []
         self.postmen = []
 
-        for r in for self.runners:
+        for r in self.runners:
             # Start the queue. Set a size limit to keep the queue from going
             # off the rails. An OOM condition will bring everything else down.
             q = queue.Queue(maxsize=MAX_PIPELINE_QUEUE_LEN)
@@ -248,8 +259,8 @@ class TPURunner(object):
         output_details = self.get_output_details()
 
         # Print debug
-        logging.debug(f"TPU & segment counts: {} & {}\n".format(tpu_count, segment_count)
-        logging.debug(f"Interpreter count: {}\n".format(len(self.interpreters))
+        logging.debug("TPU & segment counts: {} & {}\n".format(tpu_count, segment_count))
+        logging.debug("Interpreter count: {}\n".format(len(self.interpreters)))
         logging.debug(f"Input details: {input_details}\n")
         logging.debug(f"Output details: {output_details}\n")
 
@@ -270,8 +281,13 @@ class TPURunner(object):
         up, reducing its own workload, and giving unexpected results to the end
         user.
         """
-        # TODO: we could probably put a timer in here to only run this no more
-        # than every few seconds rather than every call.
+        now_ts = datetime.now()
+        
+        # Check to make sure we aren't checking too often
+        if self.last_check_timer != None and \
+           (now_ts - self.last_check_timer).total_seconds() < 5:
+            return
+        self.last_check_timer = now_ts
         
         # Check temperatures
         msg = "Core {} is {} Celsius and will likely be throttled"
@@ -288,7 +304,7 @@ class TPURunner(object):
         # Once an hour, refresh the interpreters
         if any(self.interpreters):
             seconds_since_created = \
-                (datetime.now() - self.interpreter_created).total_seconds()
+                (now_ts - self.interpreter_created).total_seconds()
                 
             if seconds_since_created > interpreter_lifespan_secs:
                 logging.info("Refreshing the Tensorflow Interpreters")
@@ -407,7 +423,7 @@ class TPURunner(object):
                                           
                 all_objects.append(detect.Object(id=int(class_ids[0][i]),
                                                  score=float(scores[i]),
-                                                 bbox=bbox.map(int))
+                                                 bbox=bbox.map(int)))
 
         end_time = int((time.perf_counter() - start_inference_time) * 1000)
 
@@ -462,28 +478,36 @@ class TPURunner(object):
                 idxs, np.concatenate(([len(idxs) - 1], np.where(ious > threshold)[0])))
 
         return selected_idxs
-
-
-    def _get_tiles(self, options:Options, image: Image):
-        """
-        Returns an iterator that yields image tiles and associated location.
         
-        For tiling, we use the philosophy that it makes the most sense to
-        keep the pixel downsampling multiplier somewhat constant and resample
-        the image to fit multiples of the tensor input dimensions. The default
-        option is a multiplier of roughly 6, which should give us two tiles for
-        an image with HD or 4k dimensions. Anything larger or more
-        square-shaped will be mapped to just be a single tile. This is
-        intentionally kept conservative. To tile more agressively, reduce the
-        multiplier down from 6. Run time will go up, as the number of
-        inferences will go up with more tiles.
         
-        Also normalizes each tile after it's chopped out. This is experimental
-        and if it doesn't yield better results, should be dropped from the
-        code. It would be particularly interesting to see how this affects
-        night imagery.
+    def _resize_and_chop_tiles(self,
+                               options: Options,
+                               image: Image,
+                               queue: multiprocessing.SimpleQueue,
+                               m_width,
+                               m_height):
         """
-        _, m_height, m_width, _ = self.get_input_details()['shape']
+        Run the image resizing in an independent process pool.
+        
+        Image resizing is one of the more expensive things we're doing here.
+        It's expensive enough that it may take as much CPU time as inference
+        under some circumstances. The Lanczos resampling kernel in particular
+        is expensive, but results in quality output.
+        
+        For example, see the resizing performance charts here:
+        https://python-pillow.org/pillow-perf
+        
+        Pillow is the highly optimized version of PIL and it only runs at
+        ~100 MP/sec when making a thumbnail with the Lanczos kernel. That's
+        only 12.6 4k frames per second, maximum, in a Python process. We are
+        hoping to process more than that with TPU hardware.
+        
+        Besides multiprocessing, we can also improve performance by installing
+        the 'pillow-simd' Python library. And improve it even more by
+        re-compiling it to use AVX2 instructions. See:
+        https://github.com/uploadcare/pillow-simd#pillow-simd
+        """
+
         i_width, i_height = image.size
 
         # What tile dim do we want?
@@ -516,7 +540,7 @@ class TPURunner(object):
             
                 # Normalize input image
                 normalized_input = zero_point + \
-                    (cropped_arr.astype('float32') - cropped_arr.mean()) /
+                    (cropped_arr.astype('float32') - cropped_arr.mean()) \
                                                 (cropped_arr.std() * scale * 2)
                 np.clip(normalized_input, 0, 255, out=normalized_input)
 
@@ -528,8 +552,58 @@ class TPURunner(object):
                 logging.debug('Normalized Mean: %.3f, Standard Deviation: %.3f' %
                             (normalized_input.mean(), normalized_input.std()))
 
-                yield (normalized_input.astype(np.uint8),
-                       (x_off, y_off, i_width / resamp_x, i_height / resamp_y))
+                queue.put((normalized_input.astype(np.uint8),
+                          (x_off, y_off, i_width / resamp_x, i_height / resamp_y)))
+        queue.put(None)
+        return
+
+
+    def _get_tiles(self, options: Options, image: Image):
+        """
+        Returns an iterator that yields image tiles and associated location.
+        
+        For tiling, we use the philosophy that it makes the most sense to
+        keep the pixel downsampling multiplier somewhat constant and resample
+        the image to fit multiples of the tensor input dimensions. The default
+        option is a multiplier of roughly 6, which should give us two tiles for
+        an image with HD or 4k dimensions. Anything larger or more
+        square-shaped will be mapped to just be a single tile. This is
+        intentionally kept conservative. To tile more agressively, reduce the
+        multiplier down from 6. Run time will go up, as the number of
+        inferences will go up with more tiles.
+        
+        If we don't tile the images, we end up with bad options:
+        - We stretch the image to fit the tensor input. In the case of a 4k
+        video stream, this basically doubles the height of images by streching
+        them. Warping an image like this doesn't seem like it would improve AI
+        performance.
+        - We keep the aspect ratio the same and pad the image. In the case of
+        a 4k image, this is wasting ~44% of the potential input data as simply
+        padding. In the case of our smallest 300x300 model, a full 131x300
+        pixels are wasted.
+        
+        It makes more sense to me to split the image in two; resulting in two
+        tiles that are each neither very warped or have wasted input pixels.
+        
+        Also normalizes each tile after it's chopped out. This is experimental
+        and if it doesn't yield better results, should be dropped from the
+        code. It would be particularly interesting to see how this affects
+        night imagery.
+        """
+        _, m_height, m_width, _ = self.get_input_details()['shape']
+
+        # Run resizing and tiling off the main thread. It'll take a while
+        # and we don't want to block.
+        q = multiprocessing.SimpleQueue()
+        mp_pool.apply_async(self._resize_and_chop_tiles,
+                            (options, image, q, m_width, m_height))
+
+        # Return the tiles as they become available
+        while True:
+            rs = q.get()
+            if rs == None:
+                return
+            yield rs
 
 
     def get_output_details(self):

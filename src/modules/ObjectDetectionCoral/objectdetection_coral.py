@@ -46,11 +46,10 @@ import numpy as np
 from PIL import Image
 from PIL import ImageDraw
 
-import tpu_runners
 from options import Options
 from tpu_runner import TPURunner
 
-tpu_runners = TPURunner()
+tpu_runner = TPURunner()
 
 
 def do_detect(options: Options, img: Image, score_threshold: float = 0.5):
@@ -88,7 +87,7 @@ def do_detect(options: Options, img: Image, score_threshold: float = 0.5):
     """
 
     # Run inference
-    inference_rs = tpu_runners.process_image(options, image, score_threshold)
+    inference_rs = tpu_runner.process_image(options, image, score_threshold)
     if inference_rs == False:
         return {
             "success"     : False,
@@ -151,21 +150,16 @@ def main():
   args = parser.parse_args()
 
   labels = read_label_file(args.labels) if args.labels else {}
-  interpreters = make_interpreter(args.model)
-  interpreter.allocate_tensors()
 
   image = Image.open(args.input)
-  _, scale = common.set_resized_input(
-      interpreter, image.size, lambda size: image.resize(size, Image.ANTIALIAS))
 
   print('----INFERENCE TIME----')
   print('Note: The first inference is slow because it includes',
         'loading the model into Edge TPU memory.')
   for _ in range(args.count):
     start = time.perf_counter()
-    interpreter.invoke()
+    do_detect(Options(), image)
     inference_time = time.perf_counter() - start
-    objs = detect.get_objects(interpreter, args.threshold, scale)
     print('%.2f ms' % (inference_time * 1000))
 
   print('-------RESULTS--------')

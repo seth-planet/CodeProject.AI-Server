@@ -80,9 +80,15 @@ class Options:
         self.min_confidence = float(ModuleOptions.getEnvVariable("MIN_CONFIDENCE", self.MIN_CONFIDENCE))
 
         self.sleep_time     = 0.01
-        self.downsample_by  = 5.8 # smaller number results in more tiles generated
+        
+        # smaller number results in more tiles generated
+        self.downsample_by  = 5.8
         self.tile_overlap   = 15
         self.iou_threshold  = 0.1
+
+        # Start with fewer processes, but we can scale up as needed
+        # Processes are pretty heavy on memory.
+        self.resize_processes = 1
 
         # Normalise input
         self.model_size     = self.model_size.lower()
