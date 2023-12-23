@@ -102,7 +102,7 @@ class TPURunner(object):
         logging.debug("Unable to find a temperature file")
                     
                     
-    def _post_service(self, r, q: queue.Queue):
+    def _post_service(self, r: pipeline.PipelinedModelRunner, q: queue.Queue):
         """
         A worker thread that loops to pull results from the pipelined model
         runner and deliver them to the requesting thread's queue. This is the
