@@ -30,7 +30,7 @@
       // These are all optional. Defaults are usually fine
       "SupportGPU": true,
       "AcceleratorDeviceName": null,  // = default
-      "Parallelism": 1,               // 0 = Default (number of CPUs - 1)
+      "Parallelism": 0,               // 0 = Default (number of CPUs - 1)
       "HalfPrecision": "enable",      // "Force", "Enable", "Disable": whether to force on, allow, or disable half-precision ops
       "PostStartPauseSecs": 1,        // 1 if using GPU, 0 for CPU
 

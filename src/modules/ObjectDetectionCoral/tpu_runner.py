@@ -167,7 +167,7 @@ class TPURunner(object):
         self.runners = []
         segment_count = max(1, len(options.tpu_segment_files))
 
-        if self.mp_pool is None:
+        if self.mp_pool is None and options.resize_processes > 0:
             self.mp_pool = multiprocessing.Pool(processes=options.resize_processes)
 
         # Only allocate the TPUs we will use
@@ -221,7 +221,7 @@ class TPURunner(object):
                                         delegate=None)]
             except Exception as ex:
                 logging.warning("Error creating interpreter: " + str(ex))
-                self.interpreters = None
+                self.interpreters = []
         
         # Womp womp
         if not any(self.interpreters):
@@ -348,7 +348,7 @@ class TPURunner(object):
         self.postmen        = None
         self.postboxes      = None
         self.runners        = None
-        self.interpreters   = None
+        self.interpreters   = []
 
 
     def process_image(self,
@@ -378,7 +378,7 @@ class TPURunner(object):
         
         # Potentially resize & pipeline a number of tiles
         for rs_image, rs_loc in self._get_tiles(options, image):
-            rs_queue = queue.Queue()
+            rs_queue = queue.Queue(maxsize=1)
             all_queues.append((rs_queue, rs_loc))
 
             with self.runner_lock:
@@ -398,11 +398,13 @@ class TPURunner(object):
 
         # Wait for the results here
         start_inference_time = time.perf_counter()
+        q_count = 0
         for rs_queue, rs_loc in all_queues:
             # Wait for results
             # We may have to wait a few seconds at most, but I'd expect the
             # pipeline to clear fairly quickly.
             result = rs_queue.get(timeout=MAX_WAIT_TIME)
+            q_count += 1
             assert result
             
             score_values, boxes, count, class_ids = result.values()
@@ -429,6 +431,9 @@ class TPURunner(object):
                                                  bbox=bbox.map(int)))
 
         end_time = int((time.perf_counter() - start_inference_time) * 1000)
+        
+        if q_count <= 1:
+            return all_objects, end_time
 
         # Remove duplicate objects
         idxs = self._non_max_suppression(all_objects, options.iou_threshold)
@@ -596,11 +601,14 @@ class TPURunner(object):
         """
         _, m_height, m_width, _ = self.get_input_details()['shape']
 
-        # Run resizing and tiling off the main thread. It'll take a while
-        # and we don't want to block.
         q = multiprocessing.SimpleQueue()
-        self.mp_pool.apply_async(self._resize_and_chop_tiles,
-                                 (options, image, q, m_width, m_height))
+        if self.mp_pool == None:
+            self._resize_and_chop_tiles(options, image, q, m_width, m_height)
+        else:
+            # Run resizing and tiling off the main thread. It'll take a while
+            # and we don't want to block all threads with the GIL.
+            self.mp_pool.apply_async(self._resize_and_chop_tiles,
+                                     (options, image, q, m_width, m_height))
 
         # Return the tiles as they become available
         while True:

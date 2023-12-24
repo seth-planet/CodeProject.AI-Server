@@ -35,6 +35,7 @@ python.exe coral\pycoral\examples\classify_image.py --model coral\pycoral\test_d
 """
 import argparse
 import time
+import multiprocessing
 
 from PIL import Image
 from PIL import ImageDraw
@@ -74,25 +75,38 @@ def main():
   args = parser.parse_args()
 
   options = Options()
+  # Load segments
   if len(args.model) > 1:
     options.tpu_segment_names = args.model
   else:
     options.model_cpu_file = args.model[0]
     options.model_tpu_file = args.model[0]
-  
-  labels = read_label_file(args.labels) if args.labels else {}
 
+  # Limit to one tile
+  options.downsample_by  = 20
+  
+  # Don't use a pool of workers to resize
+  options.resize_processes = 0
+
+  labels = read_label_file(args.labels) if args.labels else {}
   image = Image.open(args.input)
 
   print('----INFERENCE TIME----')
   print('Note: The first inference is slow because it includes',
         'loading the model into Edge TPU memory.')
-        
-  for _ in range(args.count):
+
+  if args.count > 1:
+    pool = multiprocessing.pool.ThreadPool(16)
     start = time.perf_counter()
-    objs = tpu_runner.process_image(options, image, args.threshold)
-    inference_time = time.perf_counter() - start
-    print('%.2f ms' % (inference_time * 1000))
+    for _ in pool.starmap(tpu_runner.process_image, [(options, image, args.threshold)
+                                                  for i in range(args.count-1)]):
+      pass
+  else:
+    start = time.perf_counter()
+
+  objs = tpu_runner.process_image(options, image, args.threshold)
+  inference_time = time.perf_counter() - start
+  print('%.2f ms average over %d runs' % (inference_time * 1000 / args.count, args.count))
 
   print('-------RESULTS--------')
   if not objs:
