@@ -74,7 +74,7 @@ class TPURunner(object):
         self.interpreter_created = None  # When were the interpreters created?
         self.labels              = None  # set of labels for this model
         self.runners             = None  # Pipeline(s) to run the model
-        self.tpu_count           = 0
+        self.tpu_count           = 0     # Number of TPUs we end up using
 
         self.next_runner_idx     = 0     # Which runner to execute on next?
         self.postboxes           = None # Store output

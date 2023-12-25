@@ -26,7 +26,7 @@ class Options:
         # https://coral.ai/models/object-detection/
         # https://github.com/MikeLud/CodeProject.AI-Custom-IPcam-Models/
         self.MODEL_SETTINGS = {
-            "yolov5l":  Settings(640, 'yolov5l-int8.tflite',
+            "yolov5l":  Settings(448, 'yolov5l-int8.tflite',
                                       'yolov5l-int8_edgetpu.tflite',
                                       'coco80_labels.txt',
                                       ['yolov5l-int8_segment_0_of_7_edgetpu.tflite',
@@ -37,7 +37,7 @@ class Options:
                                        'yolov5l-int8_segment_5_of_7_edgetpu.tflite',
                                        'yolov5l-int8_segment_6_of_7_edgetpu.tflite']),
 
-            "yolov5m":  Settings(640, 'yolov5m-int8.tflite',
+            "yolov5m":  Settings(448, 'yolov5m-int8.tflite',
                                       'yolov5m-int8_edgetpu.tflite',
                                       'coco80_labels.txt',
                                       ['yolov5m-int8_segment_0_of_4_edgetpu.tflite',
@@ -45,12 +45,12 @@ class Options:
                                        'yolov5m-int8_segment_2_of_4_edgetpu.tflite',
                                        'yolov5m-int8_segment_3_of_4_edgetpu.tflite']),
 
-            "yolov5s":  Settings(640, 'yolov5s-int8.tflite',
+            "yolov5s":  Settings(448, 'yolov5s-int8.tflite',
                                       'yolov5s-int8_edgetpu.tflite',
                                       'coco80_labels.txt',
                                       []),
 
-            "yolov5n":  Settings(640, 'yolov5n-int8.tflite',
+            "yolov5n":  Settings(448, 'yolov5n-int8.tflite',
                                       'yolov5n-int8_edgetpu.tflite',
                                       'coco80_labels.txt',
                                       []),

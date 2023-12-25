@@ -83,9 +83,11 @@ def main():
     options.model_tpu_file = args.model[0]
 
   # Limit to one tile
+  # Allows us apples-to-apples comparisons when benchmarking
   options.downsample_by  = 100
   
   # Don't use a pool of workers to resize & normalize images
+  # FIXME: automate this option after further testing
   options.resize_processes = 0
 
   labels = read_label_file(args.labels) if args.labels else {}
@@ -110,9 +112,14 @@ def main():
   inference_time = time.perf_counter() - start
   print('%.2f ms avg wall time for each of %d runs' %
                             (inference_time * 1000 / args.count, args.count))
-  print('%.2f ms avg time waiting for inference; %.2f avg tpu ms / run' %
+                            
+  # Optimizing the number of segments used for a model would result in the
+  # lowest average time spent adjusted for number of TPUs used. At some point,
+  # adding additional segments just removes from the pool of TPUs you can use
+  # for parallelism.
+  print('%.2f ms avg time waiting for inference; %.2f avg TPU ms / run' %
                             (tot_infr_time / args.count,
-                             tpu_runner.tpu_count * tot_infr_time / args.count))
+                             tpu_runner.tpu_count * inference_time * 1000 / args.count))
 
   print('-------RESULTS--------')
   if not objs:
