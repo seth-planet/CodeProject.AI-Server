@@ -83,9 +83,9 @@ def main():
     options.model_tpu_file = args.model[0]
 
   # Limit to one tile
-  options.downsample_by  = 20
+  options.downsample_by  = 100
   
-  # Don't use a pool of workers to resize
+  # Don't use a pool of workers to resize & normalize images
   options.resize_processes = 0
 
   labels = read_label_file(args.labels) if args.labels else {}
@@ -95,18 +95,24 @@ def main():
   print('Note: The first inference is slow because it includes',
         'loading the model into Edge TPU memory.')
 
+  tot_infr_time = 0
   if args.count > 1:
     pool = multiprocessing.pool.ThreadPool(16)
     start = time.perf_counter()
-    for _ in pool.starmap(tpu_runner.process_image, [(options, image, args.threshold)
-                                                  for i in range(args.count-1)]):
-      pass
+    for _, infr_time in pool.starmap(tpu_runner.process_image,
+            [(options, image, args.threshold) for i in range(args.count-1)]):
+        tot_infr_time += infr_time
   else:
     start = time.perf_counter()
 
-  objs = tpu_runner.process_image(options, image, args.threshold)
+  objs, infr_time = tpu_runner.process_image(options, image, args.threshold)
+  tot_infr_time += infr_time
   inference_time = time.perf_counter() - start
-  print('%.2f ms average over %d runs' % (inference_time * 1000 / args.count, args.count))
+  print('%.2f ms avg wall time for each of %d runs' %
+                            (inference_time * 1000 / args.count, args.count))
+  print('%.2f ms avg time waiting for inference; %.2f avg tpu ms / run' %
+                            (tot_infr_time / args.count,
+                             tpu_runner.tpu_count * tot_infr_time / args.count))
 
   print('-------RESULTS--------')
   if not objs:

@@ -74,6 +74,7 @@ class TPURunner(object):
         self.interpreter_created = None  # When were the interpreters created?
         self.labels              = None  # set of labels for this model
         self.runners             = None  # Pipeline(s) to run the model
+        self.tpu_count           = 0
 
         self.next_runner_idx     = 0     # Which runner to execute on next?
         self.postboxes           = None # Store output
@@ -134,6 +135,26 @@ class TPURunner(object):
             q.get(timeout=MAX_WAIT_TIME).put(rs, timeout=MAX_WAIT_TIME)
 
 
+    def _get_devices():
+        """Returns list of device names in usb:N or pci:N format.
+
+        This function prefers returning PCI Edge TPU first.
+
+        Returns:
+        list of devices in pci:N and/or usb:N format
+
+        Raises:
+        RuntimeError: if not enough devices are available
+        """
+        edge_tpus = list_edge_tpus()
+
+        num_pci_devices = sum(1 for device in edge_tpus if device['type'] == 'pci')
+        logging.debug("{} PCIe TPUs detected".format(num_pci_devices))
+
+        return ['pci:%d' % i for i in range(min(len(edge_tpus), num_pci_devices))] + [
+          'usb:%d' % i for i in range(max(0, len(edge_tpus) - num_pci_devices))]
+
+
     # Should be called while holding runner_lock (if called at run time)
     def init_interpreters(self, options: Options) -> str:
         """
@@ -165,14 +186,17 @@ class TPURunner(object):
 
         self.interpreters = []
         self.runners = []
-        segment_count = max(1, len(options.tpu_segment_files))
+        
+        segment_count = 1
+        if any(options.tpu_segment_files):
+            segment_count = max(1, len(options.tpu_segment_files))
 
         if self.mp_pool is None and options.resize_processes > 0:
             self.mp_pool = multiprocessing.Pool(processes=options.resize_processes)
 
         # Only allocate the TPUs we will use
-        tpu_count = len(list_edge_tpus()) # segment_count
-        tpu_count *= segment_count
+        tpu_list = self._get_devices()
+        self.tpu_count = (len(tpu_list) // segment_count) * segment_count
        
         # Read labels
         self.labels = read_label_file(options.label_file) \
@@ -183,7 +207,7 @@ class TPURunner(object):
         try:
             device = "tpu"
 
-            for i in range(tpu_count):
+            for i in range(self.tpu_count):
                 # Alloc all segments into all TPUs, but no more than that.
                 if segment_count > 1:
                     tpu_segment_file = \
@@ -193,9 +217,9 @@ class TPURunner(object):
                 
                 self.interpreters.append(make_interpreter(
                                             tpu_segment_file,
-                                            device=":{}".format(i),
+                                            device=tpu_list[i],
                                             delegate=None))
-            logging.debug("Loaded {} TPUs".format(tpu_count))
+            logging.debug("Loaded {} TPUs".format(self.tpu_count))
 
             # Fallback to CPU
             if not any(self.interpreters):
@@ -234,7 +258,7 @@ class TPURunner(object):
         self.interpreter_created = datetime.now()
         
         # Initialize runners/pipelines
-        for i in range(0, tpu_count, segment_count):
+        for i in range(0, self.tpu_count, segment_count):
             self.runners.append(
                 pipeline.PipelinedModelRunner(
                     self.interpreters[i:i+segment_count]))
@@ -262,7 +286,7 @@ class TPURunner(object):
         output_details = self.get_output_details()
 
         # Print debug
-        logging.debug("TPU & segment counts: {} & {}\n".format(tpu_count, segment_count))
+        logging.debug("TPU & segment counts: {} & {}\n".format(self.tpu_count, segment_count))
         logging.debug("Interpreter count: {}\n".format(len(self.interpreters)))
         logging.debug(f"Input details: {input_details}\n")
         logging.debug(f"Output details: {output_details}\n")
@@ -288,7 +312,7 @@ class TPURunner(object):
         
         # Check to make sure we aren't checking too often
         if self.last_check_timer != None and \
-           (now_ts - self.last_check_timer).total_seconds() < 5:
+           (now_ts - self.last_check_timer).total_seconds() < 10:
             return
         self.last_check_timer = now_ts
         
@@ -296,20 +320,24 @@ class TPURunner(object):
         msg = "Core {} is {} Celsius and will likely be throttled"
         if self.temp_fname_format != None:
             for i in len(self.interpreters):
+                temp_arr = []
                 if os.path.exists(self.temp_fname_format.format(i)):
                     with open(self.temp_fname_format.format(i), "r") as fp:
                         # Convert from milidegree C to degree C
                         temp = int(fp.read()) // 1000
+                        temp_arr.append(temp)
                         
                         if WARN_TEMPERATURE_THRESHOLD <= temp:
                             logging.warning(msg.format(i, temp))
-    
+                logging.debug("Temperatures: {} avg; {} max; {} total".format(
+                                                sum(temp_arr) // len(temp_arr),
+                                                max(temp_arr),
+                                                len(temp_arr)))
+
         # Once an hour, refresh the interpreters
         if any(self.interpreters):
-            seconds_since_created = \
-                (now_ts - self.interpreter_created).total_seconds()
-                
-            if seconds_since_created > self.interpreter_lifespan_secs:
+            if (now_ts - self.interpreter_created).total_seconds() > \
+                                                self.interpreter_lifespan_secs:
                 logging.info("Refreshing the Tensorflow Interpreters")
 
                 # Close all existing work before destroying...
@@ -397,13 +425,15 @@ class TPURunner(object):
         score_scale, zero_point = self.get_output_details()['quantization']
 
         # Wait for the results here
-        start_inference_time = time.perf_counter()
+        tot_infr_time = 0
         q_count = 0
         for rs_queue, rs_loc in all_queues:
             # Wait for results
             # We may have to wait a few seconds at most, but I'd expect the
             # pipeline to clear fairly quickly.
+            start_inference_time = time.perf_counter()
             result = rs_queue.get(timeout=MAX_WAIT_TIME)
+            tot_infr_time += time.perf_counter() - start_inference_time
             q_count += 1
             assert result
             
@@ -429,16 +459,17 @@ class TPURunner(object):
                 all_objects.append(detect.Object(id=int(class_ids[0][i]),
                                                  score=float(scores[i]),
                                                  bbox=bbox.map(int)))
-
-        end_time = int((time.perf_counter() - start_inference_time) * 1000)
         
+        # Convert to ms
+        tot_infr_time = int(tot_infr_time * 1000)
+
         if q_count <= 1:
-            return all_objects, end_time
+            return all_objects, tot_infr_time
 
         # Remove duplicate objects
         idxs = self._non_max_suppression(all_objects, options.iou_threshold)
         
-        return ([all_objects[i] for i in idxs], end_time)
+        return ([all_objects[i] for i in idxs], tot_infr_time)
         
         
     def _non_max_suppression(self, objects, threshold):
@@ -554,11 +585,11 @@ class TPURunner(object):
 
                 # Print image stats
                 logging.debug('Input Min: %.3f, Max: %.3f' %
-                                    (cropped_arr.min(), cropped_arr.max()))
+                              (cropped_arr.min(), cropped_arr.max()))
                 logging.debug('Normalized Min: %.3f, Max: %.3f' %
-                            (normalized_input.min(), normalized_input.max()))
+                              (normalized_input.min(), normalized_input.max()))
                 logging.debug('Normalized Mean: %.3f, Standard Deviation: %.3f' %
-                            (normalized_input.mean(), normalized_input.std()))
+                              (normalized_input.mean(), normalized_input.std()))
 
                 queue.put((normalized_input.astype(np.uint8),
                           (x_off, y_off, i_width / resamp_x, i_height / resamp_y)))

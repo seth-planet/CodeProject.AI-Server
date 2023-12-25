@@ -22,8 +22,40 @@ class Options:
         # -------------------------------------------------------------------------
         # Setup constants
 
-        # Models at https://coral.ai/models/object-detection/
+        # Models at:
+        # https://coral.ai/models/object-detection/
+        # https://github.com/MikeLud/CodeProject.AI-Custom-IPcam-Models/
         self.MODEL_SETTINGS = {
+            "yolov5l":  Settings(640, 'yolov5l-int8.tflite',
+                                      'yolov5l-int8_edgetpu.tflite',
+                                      'coco80_labels.txt',
+                                      ['yolov5l-int8_segment_0_of_7_edgetpu.tflite',
+                                       'yolov5l-int8_segment_1_of_7_edgetpu.tflite',
+                                       'yolov5l-int8_segment_2_of_7_edgetpu.tflite',
+                                       'yolov5l-int8_segment_3_of_7_edgetpu.tflite',
+                                       'yolov5l-int8_segment_4_of_7_edgetpu.tflite',
+                                       'yolov5l-int8_segment_5_of_7_edgetpu.tflite',
+                                       'yolov5l-int8_segment_6_of_7_edgetpu.tflite']),
+
+            "yolov5m":  Settings(640, 'yolov5m-int8.tflite',
+                                      'yolov5m-int8_edgetpu.tflite',
+                                      'coco80_labels.txt',
+                                      ['yolov5m-int8_segment_0_of_4_edgetpu.tflite',
+                                       'yolov5m-int8_segment_1_of_4_edgetpu.tflite',
+                                       'yolov5m-int8_segment_2_of_4_edgetpu.tflite',
+                                       'yolov5m-int8_segment_3_of_4_edgetpu.tflite']),
+
+            "yolov5s":  Settings(640, 'yolov5s-int8.tflite',
+                                      'yolov5s-int8_edgetpu.tflite',
+                                      'coco80_labels.txt',
+                                      []),
+
+            "yolov5n":  Settings(640, 'yolov5n-int8.tflite',
+                                      'yolov5n-int8_edgetpu.tflite',
+                                      'coco80_labels.txt',
+                                      []),
+
+
             # Large: EfficientDet-Lite3x    90 objects, COCO 640x640x3    TF-lite v2    197.0 ms    43.9% mAP
             "large":  Settings(640, 'efficientdet_lite3x_640_ptq.tflite',
                                     'efficientdet_lite3x_640_ptq_edgetpu.tflite',
@@ -46,20 +78,20 @@ class Options:
                                     'efficientdet_lite1_384_ptq_edgetpu.tflite',
                                     'coco_labels.txt',
                                     []),
-            '''
+
             # Small: SSD MobileDet      90 objects, COCO 320x320x3    TF-lite v2    9.1 ms      32.9% mAP
-            # This seems redundant with 'small', but faster
-            "small": Settings(320,  'ssdlite_mobiledet_coco_qat_postprocess.tflite',
+            # This seems redundant with 'small', but faster and slightly lower precision
+            "small2": Settings(320,  'ssdlite_mobiledet_coco_qat_postprocess.tflite',
                                     'ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite',
                                     'coco_labels.txt',
-                                    []),'''
-            '''
+                                    []),
+
             # Small: SSD MobileNet V2   90 objects, COCO 300x300x3    TF-lite v2    7.6 ms      22.4% mAP
             # This seems redundant with 'tiny' but lower precision
-            "small": Settings(300,  'tf2_ssd_mobilenet_v2_coco17_ptq.tflite',
+            "tiny2": Settings(300,  'tf2_ssd_mobilenet_v2_coco17_ptq.tflite',
                                     'tf2_ssd_mobilenet_v2_coco17_ptq_edgetpu.tflite',
                                     'coco_labels.txt',
-                                    []),'''
+                                    []),
 
             # Tiny: MobileNet V2            90 objects, COCO 300x300x3    TF-lite v2    7.3 ms      25.6% mAP
             "tiny": Settings(300,   'ssd_mobilenet_v2_coco_quant_postprocess.tflite',
