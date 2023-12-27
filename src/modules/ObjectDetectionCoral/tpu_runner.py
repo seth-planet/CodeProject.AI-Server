@@ -95,7 +95,7 @@ class TPURunner(object):
         tpu_count = len(list_edge_tpus())
 
         for fn in temp_fname_formats:
-            for i in tpu_count:
+            for i in range(tpu_count):
                 if os.path.exists(fn.format(i)):
                     self.temp_fname_format = fn
                     logging.info("Found temperature file at: "+fn.format(i))
@@ -135,7 +135,7 @@ class TPURunner(object):
             q.get(timeout=MAX_WAIT_TIME).put(rs, timeout=MAX_WAIT_TIME)
 
 
-    def _get_devices():
+    def _get_devices(self):
         """Returns list of device names in usb:N or pci:N format.
 
         This function prefers returning PCI Edge TPU first.
@@ -214,7 +214,8 @@ class TPURunner(object):
                         options.tpu_segment_files[i % segment_count]
                 else:
                     tpu_segment_file = options.model_tpu_file
-                
+
+                logging.debug("Loading: {}".format(tpu_segment_file))
                 self.interpreters.append(make_interpreter(
                                             tpu_segment_file,
                                             device=tpu_list[i],
@@ -253,7 +254,7 @@ class TPURunner(object):
 
         # Initialize interpreters
         for i in self.interpreters:
-            self.interpreters.allocate_tensors()
+            i.allocate_tensors()
 
         self.interpreter_created = datetime.now()
         
@@ -263,11 +264,11 @@ class TPURunner(object):
                 pipeline.PipelinedModelRunner(
                     self.interpreters[i:i+segment_count]))
             
-            self.runners.set_input_queue_size(MAX_PIPELINE_QUEUE_LEN)
-            self.runners.set_output_queue_size(MAX_PIPELINE_QUEUE_LEN)
+            self.runners[-1].set_input_queue_size(MAX_PIPELINE_QUEUE_LEN)
+            self.runners[-1].set_output_queue_size(MAX_PIPELINE_QUEUE_LEN)
 
         # Setup postal queue
-        self.postboxs = []
+        self.postboxes = []
         self.postmen = []
 
         for r in self.runners:
@@ -398,7 +399,7 @@ class TPURunner(object):
         """
 
         if not self._periodic_check(options):
-            return False
+            return False, False
 
         all_objects = []
         all_queues = []
@@ -571,15 +572,15 @@ class TPURunner(object):
         # Do chunking
         for x_off in range(0, resamp_x, m_width - options.tile_overlap):
             for y_off in range(0, resamp_y, m_height - options.tile_overlap):
-                cropped_arr = resamp_img.crop((x_off,
-                                               y_off,
-                                               x_off + m_width,
-                                               y_off + m_height)).asarray()
+                cropped_arr = np.asarray(resamp_img.crop((x_off,
+                                                          y_off,
+                                                          x_off + m_width,
+                                                          y_off + m_height)), dtype='float32')
                 logging.debug("Resampled image tile {}".format(cropped_arr.size))
             
                 # Normalize input image
                 normalized_input = zero_point + \
-                    (cropped_arr.astype('float32') - cropped_arr.mean()) \
+                    (cropped_arr - cropped_arr.mean()) \
                                                 (cropped_arr.std() * scale * 2)
                 np.clip(normalized_input, 0, 255, out=normalized_input)
 

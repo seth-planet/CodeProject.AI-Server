@@ -36,6 +36,7 @@ python.exe coral\pycoral\examples\classify_image.py --model coral\pycoral\test_d
 import argparse
 import time
 import multiprocessing
+import logging
 
 from PIL import Image
 from PIL import ImageDraw
@@ -72,7 +73,13 @@ def main():
                       help='File path for the result image with annotations')
   parser.add_argument('-c', '--count', type=int, default=5,
                       help='Number of times to run inference')
+  parser.add_argument('-d', '--debug', action='store_true')
   args = parser.parse_args()
+
+  if args.debug:
+    logging.root.setLevel(logging.DEBUG)
+  else:
+    logging.root.setLevel(logging.INFO)
 
   options = Options()
   # Load segments
@@ -124,12 +131,14 @@ def main():
   print('-------RESULTS--------')
   if not objs:
     print('No objects detected')
-
-  for obj in objs:
-    print(labels.get(obj.id, obj.id))
-    print('  id:    ', obj.id)
-    print('  score: ', obj.score)
-    print('  bbox:  ', obj.bbox)
+    return
+  
+  if any(objs):
+    for obj in objs:
+      print(labels.get(obj.id, obj.id))
+      print('  id:    ', obj.id)
+      print('  score: ', obj.score)
+      print('  bbox:  ', obj.bbox)
 
   if args.output:
     image = image.convert('RGB')
