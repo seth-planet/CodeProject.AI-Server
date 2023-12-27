@@ -124,7 +124,9 @@ class TPURunner(object):
             
             # Exit if the pipeline is done
             if not rs:
+                logging.debug("Popped EOF")
                 return
+            logging.debug("Popped results")
                 
             # Get the next receiving queue and deliver the results.
             # Neither of these get() or put() operations should be blocking
@@ -192,7 +194,10 @@ class TPURunner(object):
             segment_count = max(1, len(options.tpu_segment_files))
 
         if self.mp_pool is None and options.resize_processes > 0:
+            logging.debug("Creating resize process pool")
             self.mp_pool = multiprocessing.Pool(processes=options.resize_processes)
+        else:
+            logging.debug("Resizing without process pool")
 
         # Only allocate the TPUs we will use
         tpu_list = self._get_devices()
@@ -409,6 +414,7 @@ class TPURunner(object):
         for rs_image, rs_loc in self._get_tiles(options, image):
             rs_queue = queue.Queue(maxsize=1)
             all_queues.append((rs_queue, rs_loc))
+            logging.debug("Enqueuing tile in pipeline {}".format(self.next_runner_idx))
 
             with self.runner_lock:
                 # Push the resampled image and where to put the results.
@@ -523,7 +529,7 @@ class TPURunner(object):
     def _resize_and_chop_tiles(self,
                                options: Options,
                                image: Image,
-                               queue: multiprocessing.SimpleQueue,
+                               tile_queue: multiprocessing.Queue,
                                m_width,
                                m_height):
         """
@@ -570,17 +576,17 @@ class TPURunner(object):
         zero_point = params['zero_points']
 
         # Do chunking
-        for x_off in range(0, resamp_x, m_width - options.tile_overlap):
-            for y_off in range(0, resamp_y, m_height - options.tile_overlap):
+        for x_off in range(0, resamp_x - options.tile_overlap, m_width - options.tile_overlap):
+            for y_off in range(0, resamp_y - options.tile_overlap, m_height - options.tile_overlap):
                 cropped_arr = np.asarray(resamp_img.crop((x_off,
                                                           y_off,
                                                           x_off + m_width,
                                                           y_off + m_height)), dtype='float32')
-                logging.debug("Resampled image tile {}".format(cropped_arr.size))
+                logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
             
                 # Normalize input image
                 normalized_input = zero_point + \
-                    (cropped_arr - cropped_arr.mean()) \
+                    (cropped_arr - cropped_arr.mean()) / \
                                                 (cropped_arr.std() * scale * 2)
                 np.clip(normalized_input, 0, 255, out=normalized_input)
 
@@ -592,9 +598,9 @@ class TPURunner(object):
                 logging.debug('Normalized Mean: %.3f, Standard Deviation: %.3f' %
                               (normalized_input.mean(), normalized_input.std()))
 
-                queue.put((normalized_input.astype(np.uint8),
-                          (x_off, y_off, i_width / resamp_x, i_height / resamp_y)))
-        queue.put(None)
+                tile_queue.put((normalized_input.astype(np.uint8),
+                               (x_off, y_off, i_width / resamp_x, i_height / resamp_y)))
+        tile_queue.put(None)
         return
 
 
@@ -633,7 +639,7 @@ class TPURunner(object):
         """
         _, m_height, m_width, _ = self.get_input_details()['shape']
 
-        q = multiprocessing.SimpleQueue()
+        q = multiprocessing.Queue()
         if self.mp_pool == None:
             self._resize_and_chop_tiles(options, image, q, m_width, m_height)
         else:
@@ -646,6 +652,7 @@ class TPURunner(object):
         while True:
             rs = q.get()
             if rs == None:
+                q.close()
                 return
             yield rs
 
