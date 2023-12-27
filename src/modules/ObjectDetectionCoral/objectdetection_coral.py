@@ -35,7 +35,7 @@ python.exe coral\pycoral\examples\classify_image.py --model coral\pycoral\test_d
 """
 import argparse
 import time
-import multiprocessing
+import concurrent.futures
 import logging
 
 from PIL import Image
@@ -98,6 +98,7 @@ def main():
   options.resize_processes = 0
 
   labels = read_label_file(args.labels) if args.labels else {}
+  options.label_file = args.labels
   image = Image.open(args.input)
 
   print('----INFERENCE TIME----')
@@ -106,10 +107,12 @@ def main():
 
   tot_infr_time = 0
   if args.count > 1:
-    pool = multiprocessing.pool.ThreadPool(16)
-    start = time.perf_counter()
-    for _, infr_time in pool.starmap(tpu_runner.process_image,
-            [(options, image, args.threshold) for i in range(args.count-1)]):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+      start = time.perf_counter()
+      fs = [executor.submit(tpu_runner.process_image, options, image, args.threshold)
+            for i in range(args.count-1)]
+      for future in concurrent.futures.as_completed(fs):
+        _, infr_time = future.result()
         tot_infr_time += infr_time
   else:
     start = time.perf_counter()
