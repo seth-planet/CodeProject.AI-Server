@@ -167,6 +167,10 @@ class PipelinedModelRunner:
     """
     result = self._runner.Pop()
     if result:
+      # Why are we returning every 4th value? I wish I knew. The original code
+      # worked fine for classification which uses a int8 output, but detection
+      # uses a float32 output. Probably a bug in pipelined_model_runner.py
+      # related to that. 
       result = {k: v[0::4].reshape(self._output_shapes[k]) for k, v in result.items()}
     return result
 

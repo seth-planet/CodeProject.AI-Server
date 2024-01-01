@@ -361,22 +361,29 @@ class TPURunner(object):
         return any(self.interpreters)
 
 
+    def __del__(self):
+        with self.runner_lock:
+            self._delete()
+
+
     def _delete(self):
         """
         Close and delete each of the pipelines and interpreters while flushing
         existing work.
         """
         # Close each of the pipelines
-        for i in range(len(self.runners)):
-            self.runners[i].push({})
+        if self.runners:
+            for i in range(len(self.runners)):
+                self.runners[i].push({})
 
         # The above should trigger all workers to end. If we are deleting in an
         # off-the-rails context, it's likely that something will have trouble
         # closing out its work.
-        for t in self.postmen:
-            t.join(timeout=MAX_WAIT_TIME)
-            if t.is_alive():
-                logging.warning("Thread didn't join!")
+        if self.postmen:
+            for t in self.postmen:
+                t.join(timeout=MAX_WAIT_TIME)
+                if t.is_alive():
+                    logging.warning("Thread didn't join!")
         
         # Delete
         self.postmen        = None
