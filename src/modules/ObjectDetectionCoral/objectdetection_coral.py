@@ -111,17 +111,17 @@ def main():
       start = time.perf_counter()
       fs = [executor.submit(tpu_runner.process_image, options, image, args.threshold)
             for i in range(args.count-1)]
-      for future in concurrent.futures.as_completed(fs):
-        _, infr_time = future.result()
+      for f in concurrent.futures.as_completed(fs):
+        _, infr_time = f.result()
         tot_infr_time += infr_time
   else:
     start = time.perf_counter()
 
   objs, infr_time = tpu_runner.process_image(options, image, args.threshold)
   tot_infr_time += infr_time
-  inference_time = time.perf_counter() - start
+  wall_time = time.perf_counter() - start
   print('%.2f ms avg wall time for each of %d runs' %
-                            (inference_time * 1000 / args.count, args.count))
+                            (wall_time * 1000 / args.count, args.count))
                             
   # Optimizing the number of segments used for a model would result in the
   # lowest average time spent adjusted for number of TPUs used. At some point,
@@ -129,7 +129,7 @@ def main():
   # for parallelism.
   print('%.2f ms avg time waiting for inference; %.2f avg TPU ms / run' %
                             (tot_infr_time / args.count,
-                             tpu_runner.tpu_count * inference_time * 1000 / args.count))
+                             tpu_runner.tpu_count * wall_time * 1000 / args.count))
 
   print('-------RESULTS--------')
   if not objs:

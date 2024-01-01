@@ -35,7 +35,7 @@ if platform.system() == "Linux":
 from pycoral.utils.dataset import read_label_file
 from pycoral.utils.edgetpu import make_interpreter
 from pycoral.utils.edgetpu import list_edge_tpus
-import pycoral.pipeline.pipelined_model_runner as pipeline
+import pipelined_model_runner as pipeline
 from pycoral.adapters import detect
 
 from options import Options
@@ -262,7 +262,7 @@ class TPURunner(object):
             i.allocate_tensors()
 
         self.interpreter_created = datetime.now()
-        
+
         # Initialize runners/pipelines
         for i in range(0, self.tpu_count, segment_count):
             self.runners.append(
@@ -319,7 +319,7 @@ class TPURunner(object):
         # Check to make sure we aren't checking too often
         if self.last_check_timer != None and \
            (now_ts - self.last_check_timer).total_seconds() < 10:
-            return
+            return True
         self.last_check_timer = now_ts
         
         # Check temperatures
@@ -428,9 +428,6 @@ class TPURunner(object):
                 self.next_runner_idx = \
                                 (1 + self.next_runner_idx) % len(self.runners)
 
-        # Fetch details needed for pipeline output
-        score_scale, zero_point = self.get_output_details()['quantization']
-
         # Wait for the results here
         tot_infr_time = 0
         q_count = 0
@@ -443,15 +440,13 @@ class TPURunner(object):
             tot_infr_time += time.perf_counter() - start_inference_time
             q_count += 1
             assert result
-            
-            score_values, boxes, count, class_ids = result.values()
-            scores = score_scale * (score_values[0].astype(np.int64) - zero_point)
-            
+
+            boxes, class_ids, scores, count = result.values()
             sx, sy = rs_loc[2], rs_loc[3]
 
             # Create Objects for each valid result
             for i in range(int(count[0])):
-                if scores[i] < score_threshold:
+                if scores[0][i] < score_threshold:
                     continue
                     
                 ymin, xmin, ymax, xmax = boxes[0][i]
@@ -464,7 +459,7 @@ class TPURunner(object):
                 bbox.translate(rs_loc[0], rs_loc[1])
                                           
                 all_objects.append(detect.Object(id=int(class_ids[0][i]),
-                                                 score=float(scores[i]),
+                                                 score=float(scores[0][i]),
                                                  bbox=bbox.map(int)))
         
         # Convert to ms
@@ -583,7 +578,7 @@ class TPURunner(object):
                                                           x_off + m_width,
                                                           y_off + m_height)), dtype='float32')
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
-            
+
                 # Normalize input image
                 normalized_input = zero_point + \
                     (cropped_arr - cropped_arr.mean()) / \
@@ -599,7 +594,7 @@ class TPURunner(object):
                               (normalized_input.mean(), normalized_input.std()))
 
                 tile_queue.put((normalized_input.astype(np.uint8),
-                               (x_off, y_off, i_width / resamp_x, i_height / resamp_y)))
+                               (x_off, y_off, i_width, i_height)))
         tile_queue.put(None)
         return
 
