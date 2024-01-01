@@ -77,9 +77,6 @@ class PipelinedModelRunner:
     for d in self._interpreters[-1].get_output_details():
       self._output_shapes[d['name']] = d['shape']
 
-    print(self._output_shapes)
-    print(self._interpreters[0]._get_full_signature_list())
-
   def __del__(self):
     if self._runner:
       # Push empty request to stop the pipeline in case user forgot.
@@ -170,14 +167,6 @@ class PipelinedModelRunner:
     """
     result = self._runner.Pop()
     if result:
-      #print("Result:")
-      #print(result)
-      
-      #print(self._output_shapes)
-      #for k, v in result.items():
-        #print(v.shape)
-        #print("k: {} v: {}".format(k, v))
-      #exit()
       result = {k: v[0::4].reshape(self._output_shapes[k]) for k, v in result.items()}
     return result
 
