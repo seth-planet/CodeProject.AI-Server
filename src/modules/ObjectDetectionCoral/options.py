@@ -128,10 +128,6 @@ class Options:
         self.tile_overlap   = 15
         self.iou_threshold  = 0.1
 
-        # Start with fewer processes, but we can scale up as needed
-        # Processes are pretty heavy on memory.
-        self.resize_processes = 1
-
         # Normalise input
         self.model_size     = self.model_size.lower()
         if self.model_size not in [ "tiny", "small", "medium", "large" ]:

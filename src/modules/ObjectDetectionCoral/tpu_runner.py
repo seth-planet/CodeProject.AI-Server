@@ -193,12 +193,6 @@ class TPURunner(object):
         if any(options.tpu_segment_files):
             segment_count = max(1, len(options.tpu_segment_files))
 
-        if self.mp_pool is None and options.resize_processes > 0:
-            logging.debug("Creating resize process pool")
-            self.mp_pool = multiprocessing.Pool(processes=options.resize_processes)
-        else:
-            logging.debug("Resizing without process pool")
-
         # Only allocate the TPUs we will use
         tpu_list = self._get_devices()
         self.tpu_count = (len(tpu_list) // segment_count) * segment_count
@@ -531,7 +525,6 @@ class TPURunner(object):
     def _resize_and_chop_tiles(self,
                                options: Options,
                                image: Image,
-                               tile_queue: multiprocessing.Queue,
                                m_width,
                                m_height):
         """
@@ -555,7 +548,6 @@ class TPURunner(object):
         re-compiling it to use AVX2 instructions. See:
         https://github.com/uploadcare/pillow-simd#pillow-simd
         """
-
         i_width, i_height = image.size
 
         # What tile dim do we want?
@@ -578,6 +570,7 @@ class TPURunner(object):
         zero_point = params['zero_points']
 
         # Do chunking
+        tiles = []
         for x_off in range(0, resamp_x - options.tile_overlap, m_width - options.tile_overlap):
             for y_off in range(0, resamp_y - options.tile_overlap, m_height - options.tile_overlap):
                 cropped_arr = np.asarray(resamp_img.crop((x_off,
@@ -586,24 +579,9 @@ class TPURunner(object):
                                                           y_off + m_height)), dtype='float32')
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
 
-                # Normalize input image
-                normalized_input = zero_point + \
-                    (cropped_arr - cropped_arr.mean()) / \
-                                                (cropped_arr.std() * scale * 2)
-                np.clip(normalized_input, 0, 255, out=normalized_input)
-
-                # Print image stats
-                logging.debug('Input Min: %.3f, Max: %.3f' %
-                              (cropped_arr.min(), cropped_arr.max()))
-                logging.debug('Normalized Min: %.3f, Max: %.3f' %
-                              (normalized_input.min(), normalized_input.max()))
-                logging.debug('Normalized Mean: %.3f, Standard Deviation: %.3f' %
-                              (normalized_input.mean(), normalized_input.std()))
-
-                tile_queue.put((normalized_input.astype(np.uint8),
-                               (x_off, y_off, i_width, i_height)))
-        tile_queue.put(None)
-        return
+                tiles.append((cropped_arr.astype(np.uint8),
+                              (x_off, y_off, i_width, i_height)))
+        return tiles
 
 
     def _get_tiles(self, options: Options, image: Image):
@@ -633,30 +611,10 @@ class TPURunner(object):
         It makes more sense to me to split the image in two; resulting in two
         tiles that are each neither very warped or have wasted input pixels.
         The downside is, of course, that we are doing twice as much work.
-        
-        Also normalizes each tile after it's chopped out. This is experimental
-        and if it doesn't yield better results, should be dropped from the
-        code. It would be particularly interesting to see how this affects
-        night imagery.
         """
         _, m_height, m_width, _ = self.get_input_details()['shape']
 
-        q = multiprocessing.Queue()
-        if self.mp_pool == None:
-            self._resize_and_chop_tiles(options, image, q, m_width, m_height)
-        else:
-            # Run resizing and tiling off the main thread. It'll take a while
-            # and we don't want to block all threads with the GIL.
-            self.mp_pool.apply_async(self._resize_and_chop_tiles,
-                                     (options, image, q, m_width, m_height))
-
-        # Return the tiles as they become available
-        while True:
-            rs = q.get()
-            if rs == None:
-                q.close()
-                return
-            yield rs
+        return self._resize_and_chop_tiles(options, image, m_width, m_height)
 
 
     def get_output_details(self):
