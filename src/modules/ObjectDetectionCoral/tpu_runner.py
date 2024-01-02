@@ -40,7 +40,9 @@ from pycoral.adapters import detect
 from options import Options
 
 
-INTERPRETER_LIFESPAN_SECONDS = 3600  # Refresh the interpreters once an hour
+# Refresh the interpreters once an hour. I'm unsure if this is needed. There
+# seems to be a memory leak in the C code that this doesn't fix.
+INTERPRETER_LIFESPAN_SECONDS = 3600
 
 # Don't let the queues fill indefinitely until something more unexpected goes
 # wrong. 1000 is arbitrarily chosen to block before things get ugly.
