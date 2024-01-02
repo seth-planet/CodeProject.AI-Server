@@ -17,7 +17,6 @@ import threading
 import os
 import time
 import logging
-import multiprocessing
 import queue
 import platform
 import sys
@@ -84,6 +83,11 @@ class TPURunner(object):
         
         self.last_check_timer    = None
 
+        self.watchdog_time       = None
+        self.watchdog_shutdown   = False
+        self.watchdog_thread     = threading.Thread(target=self._watchdog)
+        self.watchdog_thread.start()
+
         logging.info("{} version: {}".format(Image.__name__, Image.__version__))
 
         # Find the temperature file
@@ -101,7 +105,21 @@ class TPURunner(object):
                     logging.info("Found temperature file at: "+fn.format(i))
                     return
         logging.debug("Unable to find a temperature file")
-                    
+
+
+    def _watchdog(self):
+        self.watchdog_time = time.time()
+        while not self.watchdog_shutdown:
+            if any(self.interpreters) and \
+               time.time() - self.watchdog_time > MAX_WAIT_TIME*2:
+                logging.warning("No work in {} seconds, watchdog shutting down TPU runners!".format(MAX_WAIT_TIME*2))
+                self.runner_lock.acquire(timeout=MAX_WAIT_TIME)
+                self._delete()
+                self.runner_lock.release()
+                # Pipeline will reinitialize itself as needed
+            time.sleep(MAX_WAIT_TIME)
+        logging.debug("Watchdog caught shutdown in {}".format(threading.get_ident()))
+
                     
     def _post_service(self, r: pipeline.PipelinedModelRunner, q: queue.Queue):
         """
@@ -121,12 +139,13 @@ class TPURunner(object):
         while True:
             # Get the next result from runner N
             rs = r.pop()
+            self.watchdog_time = time.time()
             
             # Exit if the pipeline is done
             if not rs:
-                logging.debug("Popped EOF")
+                logging.debug("Popped EOF in {}".format(threading.get_ident()))
                 return
-            logging.debug("Popped results")
+            logging.debug("Popped results in {}".format(threading.get_ident()))
                 
             # Get the next receiving queue and deliver the results.
             # Neither of these get() or put() operations should be blocking
@@ -214,7 +233,11 @@ class TPURunner(object):
                 else:
                     tpu_segment_file = options.model_tpu_file
 
-                logging.debug("Loading: {}".format(tpu_segment_file))
+                if os.path.exists(tpu_segment_file):
+                    logging.debug("Loading: {}".format(tpu_segment_file))
+                else:
+                    logging.error("TPU file doesn't exist: {}".format(tpu_segment_file))
+                    return ""
                 self.interpreters.append(make_interpreter(
                                             tpu_segment_file,
                                             device=tpu_list[i],
@@ -311,7 +334,7 @@ class TPURunner(object):
         now_ts = datetime.now()
         
         # Check to make sure we aren't checking too often
-        if self.last_check_timer != None and \
+        if any(self.interpreters) and self.last_check_timer != None and \
            (now_ts - self.last_check_timer).total_seconds() < 10:
             return True
         self.last_check_timer = now_ts
@@ -358,6 +381,8 @@ class TPURunner(object):
     def __del__(self):
         with self.runner_lock:
             self._delete()
+        self.watchdog_shutdown = True
+        self.watchdog_thread.join(timeout=MAX_WAIT_TIME*2)
 
 
     def _delete(self):
@@ -375,10 +400,15 @@ class TPURunner(object):
         # closing out its work.
         if self.postmen:
             for t in self.postmen:
+                logging.debug("Joining thread {} for TPURunner._delete()".format(t.native_id))
                 t.join(timeout=MAX_WAIT_TIME)
                 if t.is_alive():
                     logging.warning("Thread didn't join!")
-        
+
+        if self.runners:
+            for i in range(len(self.runners)):
+                self.runners[i] = None
+
         # Delete
         self.postmen        = None
         self.postboxes      = None
@@ -485,6 +515,8 @@ class TPURunner(object):
         Returns:
         A list of indexes containings the objects that pass the NMS.
         """
+        if len(objects) <= 0:
+            return []
         if len(objects) == 1:
             return [0]
 
@@ -543,7 +575,7 @@ class TPURunner(object):
         only 12.6 4k frames per second, maximum, in a Python process. We are
         hoping to process more than that with TPU hardware.
         
-        Besides multiprocessing, we can also improve performance by installing
+        We can also improve performance by installing
         the 'pillow-simd' Python library. And improve it even more by
         re-compiling it to use AVX2 instructions. See:
         https://github.com/uploadcare/pillow-simd#pillow-simd
@@ -563,11 +595,6 @@ class TPURunner(object):
         # Chop & resize image piece
         resamp_img = image.convert('RGB').resize((resamp_x, resamp_y),
                                                  Image.LANCZOS)
-
-        # Normalize pixel values
-        params = self.get_input_details()['quantization_parameters']
-        scale = params['scales']
-        zero_point = params['zero_points']
 
         # Do chunking
         tiles = []

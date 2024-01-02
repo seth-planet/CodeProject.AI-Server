@@ -80,7 +80,12 @@ class PipelinedModelRunner:
   def __del__(self):
     if self._runner:
       # Push empty request to stop the pipeline in case user forgot.
-      self.push({})
+      try:
+        self.push({})
+      except RuntimeError:
+        # Throws a runtime error in the normal case of the user already
+        # shutting down the pipeline
+        pass
       num_unconsumed = 0
       # Release any unconsumed tensors if any.
       while self.pop():
@@ -166,12 +171,18 @@ class PipelinedModelRunner:
       RuntimeError: error during retrieving pipelined model inference results.
     """
     result = self._runner.Pop()
+    dt = self._interpreters[-1].get_output_details()[0]['dtype']
+    if dt == np.uint8:
+      stride = 1
+    else:
+      stride = 4
+
     if result:
       # Why are we returning every 4th value? I wish I knew. The original code
       # worked fine for classification which uses a int8 output, but detection
       # uses a float32 output. Probably a bug in pipelined_model_runner.py
       # related to that. 
-      result = {k: v[0::4].reshape(self._output_shapes[k]) for k, v in result.items()}
+      result = {k: v[0::stride].reshape(self._output_shapes[k]) for k, v in result.items()}
     return result
 
   def interpreters(self):
