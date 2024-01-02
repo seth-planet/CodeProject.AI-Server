@@ -18,7 +18,7 @@ tpu_runner = TPURunner()
 
 def do_detect(options: Options, image: Image, score_threshold: float = 0.5):
     # Run inference
-    inference_rs = tpu_runner.process_image(options, image, score_threshold)
+    inference_rs, inferenceMs = tpu_runner.process_image(options, image, score_threshold)
 
     if inference_rs == False:
         return {
@@ -53,12 +53,11 @@ def do_detect(options: Options, image: Image, score_threshold: float = 0.5):
         "success"     : True,
         "count"       : len(outputs),
         "predictions" : outputs,
-        "inferenceMs" : inference_rs[1]
+        "inferenceMs" : inferenceMs
     }
 
 class CoralObjectDetector_adapter(ModuleRunner):
 
-    # async 
     def initialise(self) -> None:
         # if the module was launched outside of the server then the queue name 
         # wasn't set. This is normally fine, but here we want the queue to be
@@ -79,7 +78,6 @@ class CoralObjectDetector_adapter(ModuleRunner):
         else:
             self.execution_provider = "CPU"
         
-    #async 
     def process(self, data: RequestData) -> JSON:
 
         # The route to here is /v1/vision/detection
@@ -93,14 +91,12 @@ class CoralObjectDetector_adapter(ModuleRunner):
 
             response = self.do_detection(img, threshold)
         else:
-            # await self.report_error_async(None, __file__, f"Unknown command {data.command}")
             self.report_error(None, __file__, f"Unknown command {data.command}")
             response = { "success": False, "error": "unsupported command" }
 
         return response
 
 
-    # async 
     def do_detection(self, img: any, score_threshold: float):
         
         start_process_time = time.perf_counter()
@@ -129,8 +125,6 @@ class CoralObjectDetector_adapter(ModuleRunner):
                 message = result["error"]
             else:
                 message = "No objects found"
-            
-            # print(message)
 
             return {
                 "message"     : message,
@@ -142,12 +136,10 @@ class CoralObjectDetector_adapter(ModuleRunner):
             }
 
         except UnidentifiedImageError as img_ex:
-            # await self.report_error_async(img_ex, __file__, "The image provided was of an unknown type")
             self.report_error(img_ex, __file__, "The image provided was of an unknown type")
             return { "success": False, "error": "invalid image file" }
 
         except Exception as ex:
-            # await self.report_error_async(ex, __file__)
             self.report_error(ex, __file__)
             return { "success": False, "error": "Error occurred on the server"}
 

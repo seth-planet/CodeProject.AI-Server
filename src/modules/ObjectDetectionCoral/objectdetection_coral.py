@@ -37,9 +37,11 @@ import argparse
 import time
 import concurrent.futures
 import logging
+import copy
 
 from PIL import Image
 from PIL import ImageDraw
+
 
 from options import Options
 from tpu_runner import TPURunner
@@ -92,7 +94,7 @@ def main():
   # Limit to one tile
   # Allows us apples-to-apples comparisons when benchmarking
   options.downsample_by  = 100
-
+  
   labels = read_label_file(args.labels) if args.labels else {}
   options.label_file = args.labels
   image = Image.open(args.input)
@@ -103,13 +105,14 @@ def main():
 
   tot_infr_time = 0 
   if args.count > 1:
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
       start = time.perf_counter()
-      fs = [executor.submit(tpu_runner.process_image, options, image, args.threshold)
-            for i in range(args.count-1)]
-      for f in concurrent.futures.as_completed(fs):
-        _, infr_time = f.result()
-        tot_infr_time += infr_time
+      for chunk_i in range(0, args.count-1, 16*8):
+        fs = [executor.submit(tpu_runner.process_image, options, copy.copy(image), args.threshold)
+              for i in range(min(16*8, args.count-1 - chunk_i))]
+        for f in concurrent.futures.as_completed(fs):
+          _, infr_time = f.result()
+          tot_infr_time += infr_time
   else:
     start = time.perf_counter()
 
@@ -138,13 +141,14 @@ def main():
       print('  id:    ', obj.id)
       print('  score: ', obj.score)
       print('  bbox:  ', obj.bbox)
-
+  
   if args.output:
     image = image.convert('RGB')
     draw_objects(ImageDraw.Draw(image), objs, labels)
     image.save(args.output)
     image.show()
 
+
 if __name__ == '__main__':
   main()
-  
+  tpu_runner = None

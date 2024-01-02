@@ -170,6 +170,8 @@ class PipelinedModelRunner:
     Raises:
       RuntimeError: error during retrieving pipelined model inference results.
     """
+    # Note that there is likely a memory leak within this C code
+    # 78 B; the name string?
     result = self._runner.Pop()
     dt = self._interpreters[-1].get_output_details()[0]['dtype']
     if dt == np.uint8:

@@ -66,9 +66,6 @@ class TPURunner(object):
         the temperature file would only be supported on Linux systems
         with the TPU installed on the PCIe bus.
         """
-        # Refresh the interpreters once an hour
-        self.interpreter_lifespan_secs = 3600
-
         self.interpreters        = []    # The model interpreters
         self.interpreter_created = None  # When were the interpreters created?
         self.labels              = None  # set of labels for this model
@@ -360,7 +357,7 @@ class TPURunner(object):
         # Once an hour, refresh the interpreters
         if any(self.interpreters):
             if (now_ts - self.interpreter_created).total_seconds() > \
-                                                self.interpreter_lifespan_secs:
+                                                INTERPRETER_LIFESPAN_SECONDS:
                 logging.info("Refreshing the Tensorflow Interpreters")
 
                 # Close all existing work before destroying...
