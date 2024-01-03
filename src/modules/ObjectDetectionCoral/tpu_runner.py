@@ -440,6 +440,8 @@ class TPURunner(object):
         all_objects = []
         all_queues = []
         name = self.get_input_details()['name']
+        _, m_height, m_width, _ = self.get_input_details()['shape']
+        i_width, i_height = image.size
         
         # Potentially resize & pipeline a number of tiles
         for rs_image, rs_loc in self._get_tiles(options, image):
@@ -473,7 +475,6 @@ class TPURunner(object):
             assert result
 
             boxes, class_ids, scores, count = result.values()
-            sx, sy = rs_loc[2], rs_loc[3]
 
             # Create Objects for each valid result
             for i in range(int(count[0])):
@@ -482,12 +483,13 @@ class TPURunner(object):
                     
                 ymin, xmin, ymax, xmax = boxes[0][i]
                 
-                bbox = detect.BBox(xmin=xmin,
-                                   ymin=ymin,
-                                   xmax=xmax,
-                                   ymax=ymax).scale(sx, sy)
-                                      
-                bbox.translate(rs_loc[0], rs_loc[1])
+                bbox = detect.BBox(xmin=max(xmin, 0.0),
+                                   ymin=max(ymin, 0.0),
+                                   xmax=min(xmax, 1.0),
+                                   ymax=min(ymax, 1.0)).\
+                                    scale(m_height, m_width).\
+                                        translate(rs_loc[0], rs_loc[1]).\
+                                            scale(rs_loc[2], rs_loc[3])
                                           
                 all_objects.append(detect.Object(id=int(class_ids[0][i]),
                                                  score=float(scores[0][i]),
@@ -603,11 +605,10 @@ class TPURunner(object):
                 cropped_arr = np.asarray(resamp_img.crop((x_off,
                                                           y_off,
                                                           x_off + m_width,
-                                                          y_off + m_height)), dtype='float32')
+                                                          y_off + m_height)), dtype='uint8')
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
 
-                tiles.append((cropped_arr.astype(np.uint8),
-                              (x_off, y_off, i_width, i_height)))
+                tiles.append((cropped_arr, (x_off, y_off, i_width/resamp_x, i_height/resamp_y)))
         return tiles
 
 
