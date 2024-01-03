@@ -66,7 +66,8 @@ class TPURunner(object):
         """
         Init object and do a check for the temperature file. Right now
         the temperature file would only be supported on Linux systems
-        with the TPU installed on the PCIe bus.
+        with the TPU installed on the PCIe bus. The Windows value is in
+        the registry.
         """
         self.interpreters        = []    # The model interpreters
         self.interpreter_created = None  # When were the interpreters created?

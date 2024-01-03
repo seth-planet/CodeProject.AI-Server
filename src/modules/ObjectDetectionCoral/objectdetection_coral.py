@@ -86,7 +86,7 @@ def main():
   options = Options()
   # Load segments
   if len(args.model) > 1:
-    options.tpu_segment_names = args.model
+    options.tpu_segment_files = args.model
   else:
     options.model_cpu_file = args.model[0]
     options.model_tpu_file = args.model[0]
@@ -95,7 +95,6 @@ def main():
   # Allows us apples-to-apples comparisons when benchmarking
   options.downsample_by  = 100
   
-  labels = read_label_file(args.labels) if args.labels else {}
   options.label_file = args.labels
   image = Image.open(args.input)
 
@@ -137,14 +136,14 @@ def main():
   
   if any(objs):
     for obj in objs:
-      print(labels.get(obj.id, obj.id))
+      print(tpu_runner.labels.get(obj.id, obj.id))
       print('  id:    ', obj.id)
       print('  score: ', obj.score)
       print('  bbox:  ', obj.bbox)
   
   if args.output:
     image = image.convert('RGB')
-    draw_objects(ImageDraw.Draw(image), objs, labels)
+    draw_objects(ImageDraw.Draw(image), objs, tpu_runner.labels)
     image.save(args.output)
     image.show()
 
