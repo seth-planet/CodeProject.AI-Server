@@ -41,7 +41,9 @@ from options import Options
 
 
 # Refresh the interpreters once an hour. I'm unsure if this is needed. There
-# seems to be a memory leak in the C code that this doesn't fix.
+# seems to be a memory leak in the C code that this doesn't fix. I believe the
+# leak is related to the 'name' string here:
+# https://github.com/google-coral/pycoral/blob/master/src/coral_wrapper.cc#L512
 INTERPRETER_LIFESPAN_SECONDS = 3600
 
 # Don't let the queues fill indefinitely until something more unexpected goes
@@ -150,9 +152,6 @@ class TPURunner(object):
             # Get the next receiving queue and deliver the results.
             # Neither of these get() or put() operations should be blocking
             # in the normal case.
-            # We may need to use copy.copy(rs) here if we see:
-            # RuntimeError: There is at least 1 reference to internal data...
-            # But I think the use of runners will be enough to fix the problem.
             q.get(timeout=MAX_WAIT_TIME).put(rs, timeout=MAX_WAIT_TIME)
 
 
