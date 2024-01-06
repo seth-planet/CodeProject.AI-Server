@@ -31,9 +31,14 @@ from PIL import Image
 if platform.system() == "Linux":
     sys.path.insert(0, "/usr/lib/python3.9/site-packages/")
 
-from pycoral.utils.dataset import read_label_file
-from pycoral.utils.edgetpu import make_interpreter
-from pycoral.utils.edgetpu import list_edge_tpus
+try:
+    from pycoral.utils.dataset import read_label_file
+    from pycoral.utils.edgetpu import make_interpreter
+    from pycoral.utils.edgetpu import list_edge_tpus
+except ImportError:
+    logging.exception("Missing pycoral function. Perhaps you are using a funky version of pycoral?")
+    exit()
+# Ok, here we need a few bugfixes in a custom pipeline runner...
 import pipelined_model_runner as pipeline
 from pycoral.adapters import detect
 
@@ -341,7 +346,7 @@ class TPURunner(object):
         # Check temperatures
         msg = "Core {} is {} Celsius and will likely be throttled"
         if self.temp_fname_format != None:
-            for i in len(self.interpreters):
+            for i in range(len(self.interpreters)):
                 temp_arr = []
                 if os.path.exists(self.temp_fname_format.format(i)):
                     with open(self.temp_fname_format.format(i), "r") as fp:
