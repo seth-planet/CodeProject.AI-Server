@@ -589,13 +589,13 @@ class TPURunner(object):
         i_width, i_height = image.size
 
         # What tile dim do we want?
-        tiles_x = max(1, round(i_width / (options.downsample_by * m_width)))
-        tiles_y = max(1, round(i_height / (options.downsample_by * m_height)))
+        tiles_x = int(max(1, round(i_width / (options.downsample_by * m_width))))
+        tiles_y = int(max(1, round(i_height / (options.downsample_by * m_height))))
         logging.debug("Chunking to {} x {} tiles".format(tiles_x, tiles_y))
 
         # Resample image to this size
-        resamp_x = m_width  + (tiles_x - 1) * (m_width  - options.tile_overlap)
-        resamp_y = m_height + (tiles_y - 1) * (m_height - options.tile_overlap)
+        resamp_x = int(m_width  + (tiles_x - 1) * (m_width  - options.tile_overlap))
+        resamp_y = int(m_height + (tiles_y - 1) * (m_height - options.tile_overlap))
         logging.debug("Resizing to {} x {} for tiling".format(resamp_x, resamp_y))
 
         # Chop & resize image piece
