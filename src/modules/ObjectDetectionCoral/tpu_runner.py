@@ -89,6 +89,7 @@ class TPURunner(object):
         self.mp_pool             = None
         
         self.last_check_timer    = None
+        self.printed_shape_map   = {}
 
         self.watchdog_time       = None
         self.watchdog_shutdown   = False
@@ -344,7 +345,7 @@ class TPURunner(object):
         self.last_check_timer = now_ts
         
         # Check temperatures
-        msg = "Core {} is {} Celsius and will likely be throttled"
+        msg = "TPU {} is {}C and will likely be throttled"
         if self.temp_fname_format != None:
             for i in range(len(self.interpreters)):
                 temp_arr = []
@@ -467,7 +468,6 @@ class TPURunner(object):
 
         # Wait for the results here
         tot_infr_time = 0
-        q_count = 0
         for rs_queue, rs_loc in all_queues:
             # Wait for results
             # We may have to wait a few seconds at most, but I'd expect the
@@ -475,10 +475,12 @@ class TPURunner(object):
             start_inference_time = time.perf_counter()
             result = rs_queue.get(timeout=MAX_WAIT_TIME)
             tot_infr_time += time.perf_counter() - start_inference_time
-            q_count += 1
             assert result
 
-            boxes, class_ids, scores, count = result.values()
+            boxes, class_ids, scores, count = self._decode_result(result, score_threshold)
+            
+            logging.debug("BBox scaling params: {}x{}, {}x{}, {:.2f}x{:.2f}".
+                format(m_width, m_height,*rs_loc))
 
             # Create Objects for each valid result
             for i in range(int(count[0])):
@@ -491,7 +493,7 @@ class TPURunner(object):
                                    ymin=max(ymin, 0.0),
                                    xmax=min(xmax, 1.0),
                                    ymax=min(ymax, 1.0)).\
-                                    scale(m_height, m_width).\
+                                    scale(m_width, m_height).\
                                         translate(rs_loc[0], rs_loc[1]).\
                                             scale(rs_loc[2], rs_loc[3])
                                           
@@ -502,13 +504,53 @@ class TPURunner(object):
         # Convert to ms
         tot_infr_time = int(tot_infr_time * 1000)
 
-        if q_count <= 1:
-            return all_objects, tot_infr_time
-
         # Remove duplicate objects
         idxs = self._non_max_suppression(all_objects, options.iou_threshold)
         
         return ([all_objects[i] for i in idxs], tot_infr_time)
+        
+        
+    def _decode_result(self, result,
+                        score_threshold: float):
+        result_list = result.values()
+        if len(result_list) == 4:
+            return result_list
+            
+        max_value = np.iinfo(self.get_output_details()['dtype']).max
+        
+        # Decode YOLOv5 result
+        boxes = []
+        class_ids = []
+        scores = []
+        for dict_values in result_list:
+            for r in dict_values:
+                for row in r:
+            
+                    # Score
+                    score = row[4]/max_value
+                    if score < score_threshold:
+                        continue
+            
+                    # BBox
+                    bbox = (row[1] - row[3]/2,
+                            row[0] - row[2]/2,
+                            row[1] + row[3]/2,
+                            row[0] + row[2]/2)
+                    bbox = [x / max_value for x in bbox]
+            
+                    # Classes
+                    class_score = 0
+                    class_id = -1
+                    for i in range(5, 85):
+                        if class_score < row[i]:
+                            class_score = row[i]
+                            class_id = i - 5
+
+                    boxes.append(bbox)
+                    class_ids.append(class_id)
+                    scores.append(score)
+
+        return ([boxes], [class_ids], [scores], [len(scores)])
         
         
     def _non_max_suppression(self, objects, threshold):
@@ -535,6 +577,8 @@ class TPURunner(object):
         areas = (xmaxs - xmins) * (ymaxs - ymins)
         scores = [o.score for o in objects]
         idxs = np.argsort(scores)
+        
+        logging.debug("Starting NMS with {} objects".format(len(objects)))
 
         selected_idxs = []
         while idxs.size != 0:
@@ -557,6 +601,7 @@ class TPURunner(object):
             idxs = np.delete(
                 idxs, np.concatenate(([len(idxs) - 1], np.where(ious > threshold)[0])))
 
+        logging.debug("Finishing NMS with {} objects".format(len(selected_idxs)))
         return selected_idxs
         
         
@@ -597,6 +642,13 @@ class TPURunner(object):
         resamp_x = int(m_width  + (tiles_x - 1) * (m_width  - options.tile_overlap))
         resamp_y = int(m_height + (tiles_y - 1) * (m_height - options.tile_overlap))
         logging.debug("Resizing to {} x {} for tiling".format(resamp_x, resamp_y))
+        
+        # It'd be useful to print this once at the beginning of the run
+        key = "{} {}".format(*image.size)
+        if key not in self.printed_shape_map:
+            logging.info(
+                "Mapping {} image to {}x{} tiles".format(image.size, tiles_x, tiles_y))
+            self.printed_shape_map[key] = True
 
         # Chop & resize image piece
         resamp_img = image.convert('RGB').resize((resamp_x, resamp_y),
@@ -646,6 +698,9 @@ class TPURunner(object):
         """
         _, m_height, m_width, _ = self.get_input_details()['shape']
 
+        # This function used to be multi-process, but it seems Pillow handles
+        # that better and faster than we would. So we just call into tile-
+        # generation as a function here.
         return self._resize_and_chop_tiles(options, image, m_width, m_height)
 
 
