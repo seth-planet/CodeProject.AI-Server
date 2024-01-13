@@ -512,46 +512,90 @@ class TPURunner(object):
         
     def _decode_result(self, result,
                         score_threshold: float):
-        result_list = result.values()
+        result_list = list(result.values())
         if len(result_list) == 4:
-            return result_list
-            
-        max_value = np.iinfo(self.get_output_details()['dtype']).max
+            # Easy case with SSD MobileNet & EfficentDet_Lite
+            if result_list[3].size == 1:
+                return result_list
+            else:
+                return (result_list[1], result_list[3], result_list[0], result_list[2])
         
-        # Decode YOLOv5 result
+        dtype = self.get_output_details()['dtype']
+        min_value = np.iinfo(dtype).min
+        max_value = np.iinfo(dtype).max
+        logging.debug("Scaling output values in range {} to {}".format(min_value, max_value))
+        
+        # Decode YOLO result
         boxes = []
         class_ids = []
         scores = []
         for dict_values in result_list:
             for r in dict_values:
-                for row in r:
-            
-                    # Score
-                    score = row[4]/max_value
-                    if score < score_threshold:
-                        continue
-            
-                    # BBox
-                    bbox = (row[1] - row[3]/2,
-                            row[0] - row[2]/2,
-                            row[1] + row[3]/2,
-                            row[0] + row[2]/2)
-                    bbox = [x / max_value for x in bbox]
-            
-                    # Classes
-                    class_score = 0
-                    class_id = -1
-                    for i in range(5, 85):
-                        if class_score < row[i]:
-                            class_score = row[i]
-                            class_id = i - 5
-
-                    boxes.append(bbox)
-                    class_ids.append(class_id)
-                    scores.append(score)
+                j, k = r.shape
+                if j < k:
+                    # YOLOv8 is flipped for some reason. We will use that to decide if we're
+                    # using a v8 or v5-based network.
+                    for row in np.transpose(r):
+                        self._decode_YOLOv8_row(row, boxes, class_ids, scores, min_value, max_value)
+                else:
+                    for row in r:
+                        self._decode_YOLOv5_row(row, boxes, class_ids, scores, min_value, max_value, score_threshold)
 
         return ([boxes], [class_ids], [scores], [len(scores)])
         
+        
+    def _decode_YOLOv8_row(self, row, boxes, class_ids, scores, min_value, max_value, score_threshold):
+        # Classes
+        class_score = min_value
+        class_id = -1
+        for i in range(4, len(row)):
+            if class_score < row[i]:
+                class_score = row[i]
+                class_id = i - 4
+
+        score = (class_score - min_value)/(max_value - min_value)
+        if class_score > -120:
+            print(row)
+        if score < score_threshold:
+            return
+
+        # BBox
+        bbox = (row[1] - row[3]/2,
+                row[0] - row[2]/2,
+                row[1] + row[3]/2,
+                row[0] + row[2]/2)
+        bbox = [x / max_value for x in bbox]
+
+        boxes.append(bbox)
+        class_ids.append(class_id)
+        scores.append(score)
+    
+        
+    def _decode_YOLOv5_row(self, row, boxes, class_ids, scores, min_value, max_value, score_threshold):
+        # Score encoded in 5th column
+        score = (row[4] - min_value)/(max_value - min_value)
+        if score < score_threshold:
+            return
+
+        # Classes encoded in 6+ columns
+        class_score = min_value
+        class_id = -1
+        for i in range(5, len(row)):
+            if class_score < row[i]:
+                class_score = row[i]
+                class_id = i - 5
+
+        # BBox encoded in columns 1-4
+        bbox = (row[1] - row[3]/2,
+                row[0] - row[2]/2,
+                row[1] + row[3]/2,
+                row[0] + row[2]/2)
+        bbox = [x / max_value for x in bbox]
+
+        boxes.append(bbox)
+        class_ids.append(class_id)
+        scores.append(score)
+
         
     def _non_max_suppression(self, objects, threshold):
         """Returns a list of indexes of objects passing the NMS.
@@ -632,6 +676,7 @@ class TPURunner(object):
         https://github.com/uploadcare/pillow-simd#pillow-simd
         """
         i_width, i_height = image.size
+        dtype = self.get_input_details()['dtype']
 
         # What tile dim do we want?
         tiles_x = int(max(1, round(i_width / (options.downsample_by * m_width))))
@@ -661,7 +706,7 @@ class TPURunner(object):
                 cropped_arr = np.asarray(resamp_img.crop((x_off,
                                                           y_off,
                                                           x_off + m_width,
-                                                          y_off + m_height)), dtype='uint8')
+                                                          y_off + m_height)), dtype=dtype)
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
 
                 tiles.append((cropped_arr, (x_off, y_off, i_width/resamp_x, i_height/resamp_y)))

@@ -124,7 +124,7 @@ class Options:
         self.sleep_time     = 0.01
         
         # smaller number results in more tiles generated
-        self.downsample_by  = 5.8
+        self.downsample_by  = 5.2
         self.tile_overlap   = 15
         self.iou_threshold  = 0.1
 

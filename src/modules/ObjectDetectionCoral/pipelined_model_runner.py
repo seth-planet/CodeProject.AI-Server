@@ -174,7 +174,7 @@ class PipelinedModelRunner:
     # 78 B; the name string?
     result = self._runner.Pop()
     dt = self._interpreters[-1].get_output_details()[0]['dtype']
-    if dt == np.uint8:
+    if dt == np.uint8 or dt == np.int8:
       stride = 1
     else:
       stride = 4
