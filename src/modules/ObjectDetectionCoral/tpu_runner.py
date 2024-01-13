@@ -554,8 +554,6 @@ class TPURunner(object):
                 class_id = i - 4
 
         score = (class_score - min_value)/(max_value - min_value)
-        if class_score > -120:
-            print(row)
         if score < score_threshold:
             return
 
