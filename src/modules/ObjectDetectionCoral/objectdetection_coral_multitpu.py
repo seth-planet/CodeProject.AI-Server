@@ -108,9 +108,6 @@ def cleanup():
   _tpu_runner = None
 
 
-from PIL import Image
-from PIL import ImageDraw
-
 def draw_objects(draw, objs, labels):
   """Draws the bounding box and label for each object."""
   for obj in objs:

@@ -200,6 +200,34 @@ class TPURunner(object):
                ['usb:%d' % i for i in range(max(0, len(edge_tpus) - num_pci_devices))]
 
 
+    def _set_segment_files(self, options: Options, tpu_list):
+        self.tpu_count = len(tpu_list)
+        self.segment_count = 1
+        if not any(options.tpu_segment_files):
+            return [options.model_tpu_file]
+            
+        if isinstance(options.tpu_segment_files[0], list):
+            # Look for a good match between avaliable TPUs and segment counts
+            # Prioritize first match
+            for fname_list in options.tpu_segment_files:
+                segment_count = len(fname_list)
+                if segment_count <= self.tpu_count and \
+                   segment_count % self.tpu_count == 0:
+                    self.segment_count = segment_count
+                    return fname_list
+        else:
+            # Only one list of segments; use it
+            # Force regardless of even match to TPU count
+            segment_count = len(options.tpu_segment_files)
+            if segment_count <= self.tpu_count:
+                self.segment_count = segment_count
+                self.tpu_count = (self.tpu_count // segment_count) * segment_count
+                return options.tpu_segment_files
+
+        # Couldn't find a good fit, use single segment
+        return [options.model_tpu_file]
+
+
     # Should be called while holding runner_lock (if called at run time)
     def init_interpreters(self, options: Options) -> str:
         """
@@ -233,14 +261,9 @@ class TPURunner(object):
         self.runners      = []
         self.device_type  = ""
         
-        segment_count = 1
-        if any(options.tpu_segment_files):
-            segment_count = max(1, len(options.tpu_segment_files))
-
-        # Only allocate the TPUs we will use
         tpu_list = self._get_devices()
-        self.device_count = (len(tpu_list) // segment_count) * segment_count
-       
+        tpu_segment_files = self._set_segment_files(options, tpu_list)
+
         # Read labels
         self.labels = read_label_file(options.label_file) \
                                                    if options.label_file else {}
@@ -251,21 +274,20 @@ class TPURunner(object):
         for i in range(self.device_count):
             # If we have a segmented file, alloc all segments into all TPUs, but 
             # no more than that. For CPU there will only be a single file.
-            if segment_count > 1:
-                tpu_segment_file = options.tpu_segment_files[i % segment_count]
-            else:
-                tpu_segment_file = options.model_tpu_file
+            fname = tpu_segment_files[i % len(tpu_segment_files)]
 
-            if os.path.exists(tpu_segment_file):
-                logging.debug("Loading: {}".format(tpu_segment_file))
+            if os.path.exists(fname):
+                logging.debug("Loading: {}".format(fname))
             else:
                 # No TPU file. Maybe we have a CPU file we can use instead?
-                logging.error("TPU file doesn't exist: {}".format(tpu_segment_file))
+                logging.error("TPU file doesn't exist: {}".format(fname))
                 self.interpreters = []
                 break
             
             try:
-                interpreter = make_interpreter(tpu_segment_file, device=tpu_list[i], delegate=None)
+                interpreter = make_interpreter(fname,
+                                               device=tpu_list[i],
+                                               delegate=None)
                 self.interpreters.append(interpreter)
             except:
                 # If we fail to create even one of the interpreters then fail all. 
@@ -282,9 +304,9 @@ class TPURunner(object):
         if not any(self.interpreters):
             
             logging.info("No Coral TPUs found or able to be initialized. Using CPU.")
-            self.device_count = 1
-            segment_count     = 1
-            self.device_type  = "cpu"
+            self.device_count  = 1
+            self.segment_count = 1
+            self.device_type   = "cpu"
 
             try:
                 # First pass is to try the edgeTPU library to create the interpreter
@@ -313,8 +335,8 @@ class TPURunner(object):
         self.interpreters_created = datetime.now()
 
         # Initialize runners/pipelines
-        for i in range(0, self.device_count, segment_count):
-            interpreter = self.interpreters[i:i+segment_count]
+        for i in range(0, self.device_count, self.segment_count):
+            interpreter = self.interpreters[i:i+self.segment_count]
             runner      = pipeline.PipelinedModelRunner(interpreter)
             runner.set_input_queue_size(self.max_pipeline_queue_length)
             runner.set_output_queue_size(self.max_pipeline_queue_length)
@@ -327,14 +349,13 @@ class TPURunner(object):
         self.postboxes = []
         self.postmen   = []
 
-        for i in range(0, self.device_count):
+        for r in self.runners:
             # Start the queue. Set a size limit to keep the queue from going
             # off the rails. An OOM condition will bring everything else down.
             q = queue.Queue(maxsize=self.max_pipeline_queue_length)
             self.postboxes.append(q)
 
             # Start the receiving worker
-            r = self.runners[i]
             t = threading.Thread(target=self._post_service, args=[r, q])
             t.start()
             self.postmen.append(t)
@@ -345,7 +366,9 @@ class TPURunner(object):
 
         # Print debug
         logging.debug("{}, device & segment counts: {} & {}\n"
-                      .format(self.device_type, self.device_count, segment_count))
+                      .format(self.device_type,
+                              self.device_count,
+                              self.segment_count))
         logging.debug("Interpreter count: {}\n".format(len(self.interpreters)))
         logging.debug(f"Input details: {input_details}\n")
         logging.debug(f"Output details: {output_details}\n")
@@ -368,10 +391,19 @@ class TPURunner(object):
         user.
         """
         now_ts = datetime.now()
-        
+
+        # Force if we've changed the model
+        force = False
+        if options.model_name != self.model_name or \
+           options.model_size != self.model_size:
+            self.model_name = options.model_name
+            self.model_size = options.model_size
+            logging.debug("Model change detected. Forcing model reload.")
+            force = True
+
         # Check to make sure we aren't checking too often
         if any(self.interpreters) and self.last_check_timer != None and \
-           (now_ts - self.last_check_timer).total_seconds() < 10:
+           not force and (now_ts - self.last_check_timer).total_seconds() < 10:
             return True
         self.last_check_timer = now_ts
         
@@ -544,45 +576,88 @@ class TPURunner(object):
         
     def _decode_result(self, result,
                         score_threshold: float):
-        result_list = result.values()
+        result_list = list(result.values())
         if len(result_list) == 4:
-            return result_list
-            
-        max_value = np.iinfo(self.get_output_details()['dtype']).max
+            # Easy case with SSD MobileNet & EfficentDet_Lite
+            if result_list[3].size == 1:
+                return result_list
+            else:
+                return (result_list[1], result_list[3], result_list[0], result_list[2])
+
+        with self.runner_lock:
+            out_details = self.get_output_details()
+        min_value = np.iinfo(out_details['dtype']).min
+        max_value = np.iinfo(out_details['dtype']).max
+        logging.debug("Scaling output values in range {} to {}".format(min_value, max_value))
         
-        # Decode YOLOv5 result
+        # Decode YOLO result
         boxes = []
         class_ids = []
         scores = []
         for dict_values in result_list:
             for r in dict_values:
-                for row in r:
-            
-                    # Score
-                    score = row[4]/max_value
-                    if score < score_threshold:
-                        continue
-            
-                    # BBox
-                    bbox = (row[1] - row[3]/2,
-                            row[0] - row[2]/2,
-                            row[1] + row[3]/2,
-                            row[0] + row[2]/2)
-                    bbox = [x / max_value for x in bbox]
-            
-                    # Classes
-                    class_score = 0
-                    class_id = -1
-                    for i in range(5, 85):
-                        if class_score < row[i]:
-                            class_score = row[i]
-                            class_id = i - 5
-
-                    boxes.append(bbox)
-                    class_ids.append(class_id)
-                    scores.append(score)
+                j, k = r.shape
+                if j < k:
+                    # YOLOv8 is flipped for some reason. We will use that to decide if we're
+                    # using a v8 or v5-based network.
+                    for row in np.transpose(r):
+                        self._decode_YOLOv8_row(row, boxes, class_ids, scores, min_value, max_value, score_threshold)
+                else:
+                    for row in r:
+                        self._decode_YOLOv5_row(row, boxes, class_ids, scores, min_value, max_value, score_threshold)
 
         return ([boxes], [class_ids], [scores], [len(scores)])
+        
+        
+    def _decode_YOLOv8_row(self, row, boxes, class_ids, scores, min_value, max_value, score_threshold):
+        # Classes
+        class_score = min_value
+        class_id = -1
+        for i in range(4, len(row)):
+            if class_score < row[i]:
+                class_score = row[i]
+                class_id = i - 4
+
+        score = (class_score - min_value)/(max_value - min_value)
+        if score < score_threshold:
+            return
+
+        # BBox
+        bbox = (row[1] - row[3]/2,
+                row[0] - row[2]/2,
+                row[1] + row[3]/2,
+                row[0] + row[2]/2)
+        bbox = [x / max_value for x in bbox]
+
+        boxes.append(bbox)
+        class_ids.append(class_id)
+        scores.append(score)
+    
+        
+    def _decode_YOLOv5_row(self, row, boxes, class_ids, scores, min_value, max_value, score_threshold):
+        # Score encoded in 5th column
+        score = (row[4] - min_value)/(max_value - min_value)
+        if score < score_threshold:
+            return
+
+        # Classes encoded in 6+ columns
+        class_score = min_value
+        class_id = -1
+        for i in range(5, len(row)):
+            if class_score < row[i]:
+                class_score = row[i]
+                class_id = i - 5
+
+        # BBox encoded in columns 1-4
+        bbox = (row[1] - row[3]/2,
+                row[0] - row[2]/2,
+                row[1] + row[3]/2,
+                row[0] + row[2]/2)
+        bbox = [x / max_value for x in bbox]
+
+        boxes.append(bbox)
+        class_ids.append(class_id)
+        scores.append(score)
         
         
     def _non_max_suppression(self, objects, threshold):
@@ -630,6 +705,12 @@ class TPURunner(object):
             unions = areas[idxs[:-1]] + areas[selected_idx] - intersections
             ious = intersections / unions
 
+            if np.isnan(np.sum(ious)):
+                logging.warning("Zero area detected, ignoring")
+                idxs = np.delete(
+                    idxs, np.concatenate(([len(idxs) - 1], np.where(not np.isnan(ious))[0])))
+                continue
+
             idxs = np.delete(
                 idxs, np.concatenate(([len(idxs) - 1], np.where(ious > threshold)[0])))
 
@@ -664,6 +745,7 @@ class TPURunner(object):
         https://github.com/uploadcare/pillow-simd#pillow-simd
         """
         i_width, i_height = image.size
+        input_details = self.get_input_details()
 
         # What tile dim do we want?
         tiles_x = int(max(1, round(i_width / (options.downsample_by * m_width))))
@@ -693,7 +775,7 @@ class TPURunner(object):
                 cropped_arr = np.asarray(resamp_img.crop((x_off,
                                                           y_off,
                                                           x_off + m_width,
-                                                          y_off + m_height)), dtype='uint8')
+                                                          y_off + m_height)), dtype=input_details['dtype'])
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
 
                 tiles.append((cropped_arr, (x_off, y_off, i_width/resamp_x, i_height/resamp_y)))
