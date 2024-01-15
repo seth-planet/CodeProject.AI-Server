@@ -367,11 +367,13 @@ class TPURunner(object):
         force = False
         if options.model_name != self.model_name or \
            options.model_size != self.model_size:
+            self.model_name = options.model_name
+            self.model_size = options.model_size
             force = True
         
         # Check to make sure we aren't checking too often
         if any(self.interpreters) and self.last_check_timer != None and \
-           (now_ts - self.last_check_timer).total_seconds() < 10:
+           not force and (now_ts - self.last_check_timer).total_seconds() < 10:
             return True
         self.last_check_timer = now_ts
         
