@@ -83,11 +83,17 @@ class CoralObjectDetector_adapter(ModuleRunner):
         # The route to here is /v1/vision/detection
 
         if data.command == "list-custom":               # list all models available
-            return { "success": True, "models": [ 'MobileNet SSD'] }
+            return { "success": True, "models": [ 'MobileNet SSD', 'EfficientDet-Lite', 'YOLOv5'] }
 
         if data.command == "detect" or data.command == "custom":
             threshold: float  = float(data.get_value("min_confidence", opts.min_confidence))
             img: Image        = data.get_image(0)
+
+            model_name:str = "MobileNet SSD"
+            if data.segments and data.segments[0]:
+                model_name = data.segments[0]
+            if model_name != opts.model_name:
+            	opts.set_model(model_name)
 
             response = self.do_detection(img, threshold)
         else:
