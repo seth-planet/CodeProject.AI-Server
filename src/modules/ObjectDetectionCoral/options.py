@@ -31,7 +31,12 @@ class Options:
                 "large":  Settings(448, 'yolov5l-int8.tflite',
                                         'yolov5l-int8_edgetpu.tflite',
                                         'coco_labels.txt',
-                                        [['yolov5l-int8_edgetpu_segment_0_of_3_edgetpu.tflite',
+                                        [['yolov5l-int8_edgetpu_segment_0_of_5_edgetpu.tflite',
+                                          'yolov5l-int8_edgetpu_segment_1_of_5_edgetpu.tflite',
+                                          'yolov5l-int8_edgetpu_segment_2_of_5_edgetpu.tflite',
+                                          'yolov5l-int8_edgetpu_segment_3_of_5_edgetpu.tflite',
+                                          'yolov5l-int8_edgetpu_segment_4_of_5_edgetpu.tflite'],
+                                         ['yolov5l-int8_edgetpu_segment_0_of_3_edgetpu.tflite',
                                           'yolov5l-int8_edgetpu_segment_1_of_3_edgetpu.tflite',
                                           'yolov5l-int8_edgetpu_segment_2_of_3_edgetpu.tflite'],
                                          ['yolov5l-int8_edgetpu_segment_0_of_2_edgetpu.tflite',
@@ -43,7 +48,9 @@ class Options:
                                           'yolov5m-int8_edgetpu_segment_1_of_2_edgetpu.tflite']]),
                 "small": Settings(448,  'yolov5s-int8.tflite',
                                         'yolov5s-int8_edgetpu.tflite',
-                                        'coco_labels.txt', []),
+                                        'coco_labels.txt',
+                                        [['yolov5s-int8_edgetpu_segment_0_of_2_edgetpu.tflite',
+                                          'yolov5s-int8_edgetpu_segment_1_of_2_edgetpu.tflite']]),
                 "tiny": Settings(448,   'yolov5n-int8.tflite',
                                         'yolov5n-int8_edgetpu.tflite',
                                         'coco_labels.txt', [])},
@@ -61,8 +68,10 @@ class Options:
                 # Small: EfficientDet-Lite2 90 objects COCO    448x448x3     2     104.6 ms     36.0% mAP
                 "small": Settings(448,  'efficientdet_lite2_448_ptq.tflite',
                                         'efficientdet_lite2_448_ptq_edgetpu.tflite',
-                                        'coco_labels.txt', []),
-
+                                        'coco_labels.txt',
+                                        [['efficientdet_lite2_448_ptq_segment_0_of_2_edgetpu.tflite',
+                                          'efficientdet_lite2_448_ptq_segment_1_of_3_edgetpu.tflite',
+                                          'efficientdet_lite2_448_ptq_segment_2_of_3_edgetpu.tflite']]),
                 # Tiny: EfficientDet-Lite1 90 objects COCO    384x384x3     2     56.3 ms     34.3% mAP
                 "tiny": Settings(384,   'efficientdet_lite1_384_ptq.tflite',
                                         'efficientdet_lite1_384_ptq_edgetpu.tflite',
@@ -185,3 +194,4 @@ class Options:
             print(f"Debug: MODEL_SIZE:     {self.model_size}")
             print(f"Debug: CPU_MODEL_NAME: {self.cpu_model_name}")
             print(f"Debug: TPU_MODEL_NAME: {self.tpu_model_name}")
+            
