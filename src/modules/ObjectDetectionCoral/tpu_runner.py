@@ -115,7 +115,7 @@ class TPURunner(object):
         self.watchdog_thread      = threading.Thread(target=self._watchdog)
         self.watchdog_thread.start()
 
-        logging.info("{} version: {}".format(Image.__name__, Image.__version__))
+        logging.debug("{} version: {}".format(Image.__name__, Image.__version__))
 
         # Find the temperature file
         # https://coral.ai/docs/pcie-parameters/
@@ -392,6 +392,10 @@ class TPURunner(object):
         now!" This seems symptomatic of the TPU throttling itself as it heats
         up, reducing its own workload, and giving unexpected results to the end
         user.
+        
+        Discussion on TPU temperatures:
+        https://coral.ai/docs/m2-dual-edgetpu/datasheet/
+        https://github.com/magic-blue-smoke/Dual-Edge-TPU-Adapter/issues/7
         """
         now_ts = datetime.now()
 
