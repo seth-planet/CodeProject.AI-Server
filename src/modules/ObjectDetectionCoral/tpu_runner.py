@@ -97,6 +97,9 @@ class TPURunner(object):
         self.interpreters_created = None  # When were the interpreters created?
         self.labels               = None  # set of labels for this model
         self.runners              = None  # Pipeline(s) to run the model
+        
+        self.model_name           = ''
+        self.model_size           = ''
 
         self.next_runner_idx      = 0     # Which runner to execute on next?
         self.postboxes            = None  # Store output
@@ -170,9 +173,9 @@ class TPURunner(object):
             
             # Exit if the pipeline is done
             if not rs:
-                logging.debug("Popped EOF in {}".format(threading.get_ident()))
+                logging.debug("Popped EOF in tid {}".format(threading.get_ident()))
                 return
-            logging.debug("Popped results in {}".format(threading.get_ident()))
+            logging.debug("Popped results in tid {}".format(threading.get_ident()))
                 
             # Get the next receiving queue and deliver the results.
             # Neither of these get() or put() operations should be blocking
@@ -201,7 +204,7 @@ class TPURunner(object):
 
 
     def _set_segment_files(self, options: Options, tpu_list):
-        self.tpu_count = len(tpu_list)
+        self.device_count = len(tpu_list)
         self.segment_count = 1
         if not any(options.tpu_segment_files):
             return [options.model_tpu_file]
@@ -211,17 +214,17 @@ class TPURunner(object):
             # Prioritize first match
             for fname_list in options.tpu_segment_files:
                 segment_count = len(fname_list)
-                if segment_count <= self.tpu_count and \
-                   segment_count % self.tpu_count == 0:
+                if segment_count <= self.device_count and \
+                   segment_count % self.device_count == 0:
                     self.segment_count = segment_count
                     return fname_list
         else:
             # Only one list of segments; use it
             # Force regardless of even match to TPU count
             segment_count = len(options.tpu_segment_files)
-            if segment_count <= self.tpu_count:
+            if segment_count <= self.device_count:
                 self.segment_count = segment_count
-                self.tpu_count = (self.tpu_count // segment_count) * segment_count
+                self.device_count = (self.device_count // segment_count) * segment_count
                 return options.tpu_segment_files
 
         # Couldn't find a good fit, use single segment
@@ -343,7 +346,7 @@ class TPURunner(object):
             self.runners.append(runner)
 
         # Sanity check
-        assert len(self.runners) == self.device_count, "No. runners MUST equal no. devices"
+        assert len(self.runners)*self.segment_count == self.device_count, "No. runners MUST equal no. devices"
 
         # Setup postal queue
         self.postboxes = []
@@ -410,8 +413,8 @@ class TPURunner(object):
         # Check temperatures
         msg = "TPU {} is {}C and will likely be throttled"
         if self.temp_fname_format != None:
+            temp_arr = []
             for i in range(len(self.interpreters)):
-                temp_arr = []
                 if os.path.exists(self.temp_fname_format.format(i)):
                     with open(self.temp_fname_format.format(i), "r") as fp:
                         # Convert from milidegree C to degree C
@@ -421,10 +424,10 @@ class TPURunner(object):
                         if self.warn_temperature_thresh_C <= temp:
                             logging.warning(msg.format(i, temp))
 
-                logging.debug("Temperatures: {} avg; {} max; {} total".format(
-                                                sum(temp_arr) // len(temp_arr),
-                                                max(temp_arr),
-                                                len(temp_arr)))
+            logging.debug("Temperatures: {} avg; {} max; {} total".format(
+                                            sum(temp_arr) // len(temp_arr),
+                                            max(temp_arr),
+                                            len(temp_arr)))
 
         # Once an hour, refresh the interpreters
         if any(self.interpreters):

@@ -2,8 +2,11 @@ import os
 try:
     from module_options import ModuleOptions
 except ImportError:
-    logging.warning("Unable to import ModuleOptions, running with defaults")
-    ModuleOptions = None
+    print("Unable to import ModuleOptions, running with defaults")
+    class ModuleOptions:
+        module_path = '.'
+        def getEnvVariable(a, b):
+            return b
 
 class Settings:
     def __init__(self, resolution, std_model_name, tpu_model_name, labels_name, tpu_segment_names):
@@ -92,7 +95,7 @@ class Options:
         self.INTERPRETER_LIFESPAN_SECONDS       = 3600.0
         self.WATCHDOG_IDLE_SECS                 = 5.0       # To be added to non-multi code
         self.MAX_IDLE_SECS_BEFORE_RECYCLE       = 60.0      # To be added to non-multi code
-        self.WARN_TEMPERATURE_THRESHOLD_CELSIUS = 80        # PCI only
+        self.WARN_TEMPERATURE_THRESHOLD_CELSIUS = 80        # PCIe only
 
         self.MAX_PIPELINE_QUEUE_LEN             = 1000      # Multi-only
         self.TILE_OVERLAP                       = 15        # Multi-only.
