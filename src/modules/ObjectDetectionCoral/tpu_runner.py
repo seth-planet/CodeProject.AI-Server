@@ -364,8 +364,8 @@ class TPURunner(object):
             self.postmen.append(t)
 
         # Get input and output tensors.
-        input_details  = self.get_input_details()
-        output_details = self.get_output_details()
+        self.input_details  = self.interpreters[0].get_input_details()[0]
+        self.output_details = self.interpreters[-1].get_output_details()[0]
 
         # Print debug
         logging.debug("{}, device & segment counts: {} & {}\n"
@@ -373,8 +373,8 @@ class TPURunner(object):
                               self.device_count,
                               self.segment_count))
         logging.debug("Interpreter count: {}\n".format(len(self.interpreters)))
-        logging.debug(f"Input details: {input_details}\n")
-        logging.debug(f"Output details: {output_details}\n")
+        logging.debug(f"Input details: {self.input_details}\n")
+        logging.debug(f"Output details: {self.output_details}\n")
 
         return self.device_type
 
@@ -511,8 +511,8 @@ class TPURunner(object):
 
         all_objects = []
         all_queues = []
-        name = self.get_input_details()['name']
-        _, m_height, m_width, _ = self.get_input_details()['shape']
+        name = self.input_details['name']
+        _, m_height, m_width, _ = self.input_details['shape']
         i_width, i_height = image.size
         
         # Potentially resize & pipeline a number of tiles
@@ -587,10 +587,8 @@ class TPURunner(object):
             else:
                 return (result_list[1], result_list[3], result_list[0], result_list[2])
 
-        with self.runner_lock:
-            out_details = self.get_output_details()
-        min_value = np.iinfo(out_details['dtype']).min
-        max_value = np.iinfo(out_details['dtype']).max
+        min_value = np.iinfo(self.output_details['dtype']).min
+        max_value = np.iinfo(self.output_details['dtype']).max
         logging.debug("Scaling output values in range {} to {}".format(min_value, max_value))
         
         # Decode YOLO result
@@ -748,7 +746,6 @@ class TPURunner(object):
         https://github.com/uploadcare/pillow-simd#pillow-simd
         """
         i_width, i_height = image.size
-        input_details = self.get_input_details()
 
         # What tile dim do we want?
         tiles_x = int(max(1, round(i_width / (options.downsample_by * m_width))))
@@ -778,7 +775,7 @@ class TPURunner(object):
                 cropped_arr = np.asarray(resamp_img.crop((x_off,
                                                           y_off,
                                                           x_off + m_width,
-                                                          y_off + m_height)), dtype=input_details['dtype'])
+                                                          y_off + m_height)), dtype=self.input_details['dtype'])
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
 
                 tiles.append((cropped_arr, (x_off, y_off, i_width/resamp_x, i_height/resamp_y)))
@@ -813,17 +810,10 @@ class TPURunner(object):
         tiles that are each neither very warped or have wasted input pixels.
         The downside is, of course, that we are doing twice as much work.
         """
-        _, m_height, m_width, _ = self.get_input_details()['shape']
+        _, m_height, m_width, _ = self.input_details['shape']
 
         # This function used to be multi-process, but it seems Pillow handles
         # that better and faster than we would. So we just call into tile-
         # generation as a function here.
         return self._resize_and_chop_tiles(options, image, m_width, m_height)
 
-
-    def get_output_details(self):
-        return self.interpreters[-1].get_output_details()[0]
-
-
-    def get_input_details(self):
-        return self.interpreters[0].get_input_details()[0]
