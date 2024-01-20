@@ -427,11 +427,13 @@ class TPURunner(object):
                         
                         if self.warn_temperature_thresh_C <= temp:
                             logging.warning(msg.format(i, temp))
-
-            logging.debug("Temperatures: {} avg; {} max; {} total".format(
-                                            sum(temp_arr) // len(temp_arr),
-                                            max(temp_arr),
-                                            len(temp_arr)))
+            if any(temp_arr):
+                logging.debug("Temperatures: {} avg; {} max; {} total".format(
+                                                sum(temp_arr) // len(temp_arr),
+                                                max(temp_arr),
+                                                len(temp_arr)))
+            else:
+                logging.warning("Unable to find temperatures!")
 
         # Once an hour, refresh the interpreters
         if any(self.interpreters):
@@ -550,7 +552,7 @@ class TPURunner(object):
 
             boxes, class_ids, scores, count = self._decode_result(result, score_threshold)
             
-            logging.debug("BBox scaling params: {}x{}, {}x{}, {:.2f}x{:.2f}".
+            logging.debug("BBox scaling params: {}x{}, ({},{}), {:.2f}x{:.2f}".
                 format(m_width, m_height,*rs_loc))
 
             # Create Objects for each valid result
@@ -594,7 +596,7 @@ class TPURunner(object):
         min_value = np.iinfo(self.output_details['dtype']).min
         max_value = np.iinfo(self.output_details['dtype']).max
         logging.debug("Scaling output values in range {} to {}".format(min_value, max_value))
-        
+
         # Decode YOLO result
         boxes = []
         class_ids = []
@@ -627,12 +629,14 @@ class TPURunner(object):
         if score < score_threshold:
             return
 
+        norm_box = [x - min_value for x in row[0:4]]
+
         # BBox
-        bbox = (row[1] - row[3]/2,
-                row[0] - row[2]/2,
-                row[1] + row[3]/2,
-                row[0] + row[2]/2)
-        bbox = [x / max_value for x in bbox]
+        bbox = (norm_box[1] - norm_box[3]/2,
+                norm_box[0] - norm_box[2]/2,
+                norm_box[1] + norm_box[3]/2,
+                norm_box[0] + norm_box[2]/2)
+        bbox = [x / (max_value - min_value) for x in bbox]
 
         boxes.append(bbox)
         class_ids.append(class_id)
@@ -772,6 +776,9 @@ class TPURunner(object):
         resamp_img = image.convert('RGB').resize((resamp_x, resamp_y),
                                                  Image.LANCZOS)
 
+        input_zero = self.input_details['quantization'][1]
+        input_scale = self.input_details['quantization'][0]
+
         # Do chunking
         tiles = []
         for x_off in range(0, resamp_x - options.tile_overlap, m_width - options.tile_overlap):
@@ -779,10 +786,14 @@ class TPURunner(object):
                 cropped_arr = np.asarray(resamp_img.crop((x_off,
                                                           y_off,
                                                           x_off + m_width,
-                                                          y_off + m_height)), dtype=self.input_details['dtype'])
+                                                          y_off + m_height)), dtype=np.float32)
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
 
-                tiles.append((cropped_arr, (x_off, y_off, i_width/resamp_x, i_height/resamp_y)))
+                # Normalize from 8-bit image to whatever the input is
+                cropped_arr = (cropped_arr/(256.0 * input_scale)) + input_zero
+
+                tiles.append((cropped_arr.astype(self.input_details['dtype']),
+                              (x_off, y_off, i_width/resamp_x, i_height/resamp_y)))
         return tiles
 
 

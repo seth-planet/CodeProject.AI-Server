@@ -38,6 +38,7 @@ import time
 import concurrent.futures
 import logging
 import copy
+import os
 
 from PIL import Image
 from PIL import ImageDraw
@@ -101,11 +102,11 @@ def do_detect(options: Options, image: Image, score_threshold: float = 0.5):
     }
 
 def cleanup():
-  global _tpu_runner
-  
-  if _tpu_runner:
-    _tpu_runner.__del__()
-  _tpu_runner = None
+    global _tpu_runner
+
+    if _tpu_runner:
+        _tpu_runner.__del__()
+        _tpu_runner = None
 
 
 def draw_objects(draw, objs, labels):
@@ -141,6 +142,7 @@ def main():
     logging.root.setLevel(logging.INFO)
 
   options = Options()
+  
   # Load segments
   if len(args.model) > 1:
     options.tpu_segment_files = args.model
@@ -154,6 +156,7 @@ def main():
   
   options.label_file = args.labels
   image = Image.open(args.input)
+  init_detect(options)
 
   print('----INFERENCE TIME----')
   print('Note: The first inference is slow because it includes',
@@ -184,7 +187,7 @@ def main():
   # for parallelism.
   print('%.2f ms avg time waiting for inference; %.2f avg TPU ms / run' %
                             (tot_infr_time / args.count,
-                             _tpu_runner.tpu_count * wall_time * 1000 / args.count))
+                             _tpu_runner.device_count * wall_time * 1000 / args.count))
 
   print('-------RESULTS--------')
   if not objs:
@@ -208,3 +211,6 @@ def main():
 if __name__ == '__main__':
   main()
   _tpu_runner = None
+  # Don't wait for threads
+  os._exit(os.EX_OK)
+

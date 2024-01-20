@@ -192,7 +192,7 @@ class PipelinedModelRunner:
     # 78 B; the name string?
     result = self._runner.Pop()
    
-    if self._dtype == np.uint8:
+    if self._dtype == np.uint8 or self._dtype == np.int8:
       stride = 1
     else:
       stride = 4
