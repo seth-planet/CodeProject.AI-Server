@@ -616,27 +616,28 @@ class TPURunner(object):
         return ([boxes], [class_ids], [scores], [len(scores)])
         
         
-    def _decode_YOLOv8_row(self, row, boxes, class_ids, scores, min_value, max_value, score_threshold):
+    def _decode_YOLOv8_row(self, int_row, boxes, class_ids, scores, min_value, max_value, score_threshold):
+        #row = int_row - min_value
+        row = [x - min_value for x in int_row]
+
         # Classes
-        class_score = min_value
+        class_score = 0
         class_id = -1
         for i in range(4, len(row)):
             if class_score < row[i]:
                 class_score = row[i]
                 class_id = i - 4
 
-        score = (class_score - min_value)/(max_value - min_value)
+        score = class_score / 255.0
         if score < score_threshold:
             return
 
-        norm_box = [x - min_value for x in row[0:4]]
-
         # BBox
-        bbox = (norm_box[1] - norm_box[3]/2,
-                norm_box[0] - norm_box[2]/2,
-                norm_box[1] + norm_box[3]/2,
-                norm_box[0] + norm_box[2]/2)
-        bbox = [x / (max_value - min_value) for x in bbox]
+        bbox = (row[1] - row[3]/2,
+                row[0] - row[2]/2,
+                row[1] + row[3]/2,
+                row[0] + row[2]/2)
+        bbox = [x / 255.0 for x in bbox]
 
         boxes.append(bbox)
         class_ids.append(class_id)
