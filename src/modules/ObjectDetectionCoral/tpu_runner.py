@@ -617,7 +617,6 @@ class TPURunner(object):
         
         
     def _decode_YOLOv8_row(self, int_row, boxes, class_ids, scores, min_value, max_value, score_threshold):
-        #row = int_row - min_value
         row = [x - min_value for x in int_row]
 
         # Classes
