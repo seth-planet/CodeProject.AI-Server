@@ -583,8 +583,9 @@ class TPURunner(object):
         return ([all_objects[i] for i in idxs], tot_infr_time)
         
         
-    def _decode_result(self, result,
-                        score_threshold: float):
+    def _decode_result(self,
+                       result,
+                       score_threshold: float):
         result_list = list(result.values())
         if len(result_list) == 4:
             # Easy case with SSD MobileNet & EfficentDet_Lite
@@ -597,76 +598,208 @@ class TPURunner(object):
         max_value = np.iinfo(self.output_details['dtype']).max
         logging.debug("Scaling output values in range {} to {}".format(min_value, max_value))
 
+        output_zero = self.output_details['quantization'][1]
+        output_scale = self.output_details['quantization'][0]
+
         # Decode YOLO result
         boxes = []
         class_ids = []
         scores = []
         for dict_values in result_list:
-            for r in dict_values:
-                j, k = r.shape
-                if j < k:
-                    # YOLOv8 is flipped for some reason. We will use that to decide if we're
-                    # using a v8 or v5-based network.
-                    for row in np.transpose(r):
-                        self._decode_YOLOv8_row(row, boxes, class_ids, scores, min_value, max_value, score_threshold)
-                else:
-                    for row in r:
-                        self._decode_YOLOv5_row(row, boxes, class_ids, scores, min_value, max_value, score_threshold)
+            j, k = dict_values[0].shape
+
+            # YOLOv8 is flipped for some reason. We will use that to decide if we're
+            # using a v8 or v5-based network.
+            if j < k:
+                rs = self._yolov8_non_max_suppression(
+                    (dict_values.astype('float32') - output_zero) * output_scale,
+                    conf_thres=score_threshold)
+            else:
+                rs = self._yolov5_non_max_suppression(
+                    (dict_values.astype('float32') - output_zero) * output_scale,
+                    conf_thres=score_threshold)
+
+            for a in rs:
+                for r in a:
+                    boxes.append(r[0:4])
+                    class_ids.append(int(r[5]))
+                    scores.append(r[4])
 
         return ([boxes], [class_ids], [scores], [len(scores)])
-        
-        
-    def _decode_YOLOv8_row(self, int_row, boxes, class_ids, scores, min_value, max_value, score_threshold):
-        row = [x - min_value for x in int_row]
 
-        # Classes
-        class_score = 0
-        class_id = -1
-        for i in range(4, len(row)):
-            if class_score < row[i]:
-                class_score = row[i]
-                class_id = i - 4
 
-        score = class_score / 255.0
-        if score < score_threshold:
-            return
+    def _xywh2xyxy(self, x):
+        # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
+        y = np.copy(x)
+        y[:, 0] = x[:, 0] - x[:, 2] / 2  # top left x
+        y[:, 1] = x[:, 1] - x[:, 3] / 2  # top left y
+        y[:, 2] = x[:, 0] + x[:, 2] / 2  # bottom right x
+        y[:, 3] = x[:, 1] + x[:, 3] / 2  # bottom right y
+        return y
 
-        # BBox
-        bbox = (row[1] - row[3]/2,
-                row[0] - row[2]/2,
-                row[1] + row[3]/2,
-                row[0] + row[2]/2)
-        bbox = [x / 255.0 for x in bbox]
-
-        boxes.append(bbox)
-        class_ids.append(class_id)
-        scores.append(score)
     
+    def _nms(self, dets, scores, thresh):
+        '''
+        dets is a numpy array : num_dets, 4
+        scores ia  nump array : num_dets,
+        '''
+
+        x1 = dets[:, 0]
+        y1 = dets[:, 1]
+        x2 = dets[:, 2]
+        y2 = dets[:, 3]
+
+        areas = (x2 - x1 + 1e-9) * (y2 - y1 + 1e-9)
+        order = scores.argsort()[::-1] # get boxes with more ious first
         
-    def _decode_YOLOv5_row(self, row, boxes, class_ids, scores, min_value, max_value, score_threshold):
-        # Score encoded in 5th column
-        score = (row[4] - min_value)/(max_value - min_value)
-        if score < score_threshold:
-            return
+        keep = []
+        while order.size > 0:
+            i = order[0] # pick maxmum iou box
+            other_box_ids = order[1:]
+            keep.append(i)
+            
+            xx1 = np.maximum(x1[i], x1[other_box_ids])
+            yy1 = np.maximum(y1[i], y1[other_box_ids])
+            xx2 = np.minimum(x2[i], x2[other_box_ids])
+            yy2 = np.minimum(y2[i], y2[other_box_ids])
+            
+            w = np.maximum(0.0, xx2 - xx1 + 1e-9) # maximum width
+            h = np.maximum(0.0, yy2 - yy1 + 1e-9) # maxiumum height
+            inter = w * h
+              
+            ovr = inter / (areas[i] + areas[other_box_ids] - inter)
+            
+            inds = np.where(ovr <= thresh)[0]
+            order = order[inds + 1]
 
-        # Classes encoded in 6+ columns
-        class_score = min_value
-        class_id = -1
-        for i in range(5, len(row)):
-            if class_score < row[i]:
-                class_score = row[i]
-                class_id = i - 5
+        return np.array(keep)
 
-        # BBox encoded in columns 1-4
-        bbox = (row[1] - row[3]/2,
-                row[0] - row[2]/2,
-                row[1] + row[3]/2,
-                row[0] + row[2]/2)
-        bbox = [x / max_value for x in bbox]
 
-        boxes.append(bbox)
-        class_ids.append(class_id)
-        scores.append(score)
+    def _yolov8_non_max_suppression(self, prediction, conf_thres=0.25, iou_thres=0.45,
+                            labels=(), max_det=3000):
+
+        nc = prediction.shape[1] - 4  # number of classes
+        bs = prediction.shape[0]  # batch size
+        nm = prediction.shape[1] - nc - 4
+        mi = 4 + nc  # mask start index
+
+        xc = np.amax(prediction[:, 4:mi], 1) > conf_thres  # candidates
+
+        prediction = prediction.transpose(0,2,1)  # shape(1,84,6300) to shape(1,6300,84)
+
+        # Checks
+        assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'
+        assert 0 <= iou_thres <= 1, f'Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0'
+
+        # Settings
+        min_wh, max_wh = 2, 4096  # (pixels) minimum and maximum box width and height
+        max_nms = 30000  # maximum number of boxes into torchvision.ops.nms()
+        time_limit = 10.0  # seconds to quit after
+
+        t = time.time()
+        output = [np.zeros((0, 6))] * prediction.shape[0]
+        for xi, x in enumerate(prediction):  # image index, image inference
+            # Apply constraints
+            x = x[xc[xi]]  # confidence
+
+            # If none remain process next image
+            if not x.shape[0]:
+                continue
+
+            # Box (center x, center y, width, height) to (x1, y1, x2, y2)
+            box = self._xywh2xyxy(x[:, :4])
+
+            # Detections matrix nx6 (xyxy, conf, cls)
+            conf = np.amax(x[:, 4:], axis=1, keepdims=True)
+            j = np.argmax(x[:, 4:], axis=1).reshape(conf.shape)
+            x = np.concatenate((box, conf, j.astype(float)), axis=1)[conf.flatten() > conf_thres]
+
+            # Check shape
+            n = x.shape[0]  # number of boxes
+            if not n:  # no boxes
+                continue
+            elif n > max_nms:  # excess boxes
+                x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence
+
+            # Batched NMS
+            c = x[:, 5:6] * max_wh  # classes
+            boxes, scores = x[:, :4] + c, x[:, 4]  # boxes (offset by class), scores
+            
+            i = self._nms(boxes, scores, iou_thres)  # NMS
+            
+            if i.shape[0] > max_det:  # limit detections
+                i = i[:max_det]
+
+            output[xi] = x[i]
+            if (time.time() - t) > time_limit:
+                logging.warning(f'NMS time limit {time_limit}s exceeded')
+                break  # time limit exceeded
+
+        return output        
+
+
+    def _yolov5_non_max_suppression(
+        self,
+        prediction,
+        conf_thres=0.25,
+        iou_thres=0.45,
+        max_det=300):
+        # Checks
+        assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
+        assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
+
+        bs = prediction.shape[0]  # batch size
+        nc = prediction.shape[2] - 5  # number of classes
+        xc = prediction[..., 4] > conf_thres  # candidates
+
+        # Settings
+        # min_wh = 2  # (pixels) minimum box width and height
+        max_wh = 7680  # (pixels) maximum box width and height
+        max_nms = 30000  # maximum number of boxes into torchvision.ops.nms()
+        time_limit = 0.5 + 0.05 * bs  # seconds to quit after
+
+        t = time.time()
+        mi = 5 + nc  # mask start index
+        output = [np.zeros((0, 6))] * bs
+        for xi, x in enumerate(prediction):  # image index, image inference
+            # Apply constraints
+            x = x[xc[xi]]  # confidence
+
+            # If none remain process next image
+            if not x.shape[0]:
+                continue
+
+            # Compute conf
+            x[:, 5:] *= x[:, 4:5]  # conf = obj_conf * cls_conf
+
+            # Box/Mask
+            box = self._xywh2xyxy(x[:, :4])  # center_x, center_y, width, height) to (x1, y1, x2, y2)
+            mask = x[:, mi:]  # zero columns if no masks
+
+            # Detections matrix nx6 (xyxy, conf, cls)
+            conf = np.amax(x[:, 5:], axis=1, keepdims=True)
+            j = np.argmax(x[:, 5:], axis=1).reshape(conf.shape)
+            x = np.concatenate((box, conf, j.astype(float)), axis=1)[conf.flatten() > conf_thres]
+
+            # Check shape
+            n = x.shape[0]  # number of boxes
+            if not n:  # no boxes
+                continue
+            elif n > max_nms:  # excess boxes
+                x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence
+
+            # Batched NMS
+            c = x[:, 5:6] * max_wh  # classes
+            boxes, scores = x[:, :4] + c, x[:, 4]  # boxes (offset by class), scores
+            i = self._nms(boxes, scores, iou_thres)  # NMS
+            i = i[:max_det]  # limit detections
+
+            output[xi] = x[i]
+            if (time.time() - t) > time_limit:
+                LOGGER.warning(f"WARNING ⚠️ NMS time limit {time_limit:.3f}s exceeded")
+                break  # time limit exceeded
+
+        return output
         
         
     def _non_max_suppression(self, objects, threshold):
