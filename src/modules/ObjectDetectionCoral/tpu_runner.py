@@ -439,6 +439,7 @@ class TPURunner(object):
         self.labels               = None  # set of labels for this model
 
         self.runner_lock          = threading.Lock()
+        self.executor             = concurrent.futures.ThreadPoolExecutor(max_workers=32)
         
         self.last_check_time      = None
         self.printed_shape_map    = {}
@@ -767,58 +768,64 @@ class TPURunner(object):
         - Return inference timing.
 
         Note that the image object is modified in place to resize it
-        for in input tensor.
+        to fit the model's input tensor.
         """
-        all_objects = []
-        all_queues  = []
-        _, m_height, m_width, _ = self.input_details['shape']
-
         with self.runner_lock:
             # Recreate the pipe if it is stale, but also check if we can
             # and have created the pipe. It's not always successful...
             (pipe_ok, error) = self._periodic_check(options)
             if not pipe_ok:
                 return None, 0, error
-            
-        # We can use a with statement to ensure threads are cleaned up promptly
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future_to_inference = {executor.submit(self.pipe.invoke, rs_image): loc for rs_image, loc in self._get_tiles(options, image)}    
+
+        tiles = self._get_tiles(options, image)
+                           
+        start_inference_time = time.perf_counter()
+        all_objects = []
+        if len(tiles) > 1:
+            # Submit tile processing to thread pool
+            future_to_inference = {self.executor.submit(self.pipe.invoke, image): loc for image, loc in tiles}    
                            
             # Wait for the results here
-            start_inference_time = time.perf_counter()
             for future in concurrent.futures.as_completed(future_to_inference):
-                rs_loc = future_to_inference[future]
-                boxes, class_ids, scores, count = self._decode_result(future.result(), score_threshold)
-                
-                logging.debug("BBox scaling params: {}x{}, ({},{}), {:.2f}x{:.2f}".
-                    format(m_width, m_height, *rs_loc))
-    
-                # Create Objects for each valid result
-                for i in range(int(count[0])):
-                    if scores[0][i] < score_threshold:
-                        continue
-                        
-                    ymin, xmin, ymax, xmax = boxes[0][i]
-                    
-                    bbox = detect.BBox(xmin=(max(xmin, 0.0)*m_width  + rs_loc[0])*rs_loc[2],
-                                       ymin=(max(ymin, 0.0)*m_height + rs_loc[1])*rs_loc[3],
-                                       xmax=(min(xmax, 1.0)*m_width  + rs_loc[0])*rs_loc[2],
-                                       ymax=(min(ymax, 1.0)*m_height + rs_loc[1])*rs_loc[3])
-    
-                    all_objects.append(detect.Object(id=int(class_ids[0][i]),
-                                                     score=float(scores[0][i]),
-                                                     bbox=bbox.map(int)))
-            tot_inference_time = time.perf_counter() - start_inference_time
+                self._rs_to_obj(future.result(), score_threshold, all_objects, future_to_inference[future])
+        else:
+            self._rs_to_obj(self.pipe.invoke(tiles[0][0]), score_threshold, all_objects, tiles[0][1])
+        tot_inference_time = time.perf_counter() - start_inference_time
         
         # Convert to ms
         tot_inference_time = int(tot_inference_time * 1000)
 
         # Remove duplicate objects
         unique_indexes = self._non_max_suppression(all_objects, options.iou_threshold)
+
+        # We got here, so the pipe must be relatively healthy.
         self.watchdog_time = time.time()
-        
         return ([all_objects[i] for i in unique_indexes], tot_inference_time, None)
+
+
+    def _rs_to_obj(self, rs, score_threshold, all_objects, rs_loc):
+        _, m_height, m_width, _ = self.input_details['shape']
+        boxes, class_ids, scores, count = self._decode_result(rs, score_threshold)
         
+        logging.debug("BBox scaling params: {}x{}, ({},{}), {:.2f}x{:.2f}".
+            format(m_width, m_height, *rs_loc))
+
+        # Create Objects for each valid result
+        for i in range(int(count[0])):
+            if scores[0][i] < score_threshold:
+                continue
+                
+            ymin, xmin, ymax, xmax = boxes[0][i]
+            
+            bbox = detect.BBox(xmin=(max(xmin, 0.0)*m_width  + rs_loc[0])*rs_loc[2],
+                               ymin=(max(ymin, 0.0)*m_height + rs_loc[1])*rs_loc[3],
+                               xmax=(min(xmax, 1.0)*m_width  + rs_loc[0])*rs_loc[2],
+                               ymax=(min(ymax, 1.0)*m_height + rs_loc[1])*rs_loc[3])
+
+            all_objects.append(detect.Object(id=int(class_ids[0][i]),
+                                             score=float(scores[0][i]),
+                                             bbox=bbox.map(int)))
+    
         
     def _decode_result(self, result_list, score_threshold: float):
         if len(result_list) == 4:
