@@ -233,9 +233,9 @@ def main():
   tot_infr_time = 0 
   half_wall_start = None
   half_infr_count = 0 
+  start = time.perf_counter()
   if args.count > 1:
     with concurrent.futures.ThreadPoolExecutor(max_workers=thread_cnt) as executor:
-      start = time.perf_counter()
       for chunk_i in range(0, args.count-1, thread_cnt*8):
         fs = [executor.submit(_tpu_runner.process_image, options, copy.copy(image), args.threshold)
               for i in range(min(thread_cnt*8, args.count-1 - chunk_i))]
@@ -253,8 +253,6 @@ def main():
         # import random
         # logging.info("Pause")
         # time.sleep(random.randint(0,INTERPRETER_LIFESPAN_SECONDS*3))
-  else:
-    start = time.perf_counter()
   
   # snapshot = tracemalloc.take_snapshot()
   # top_stats = snapshot.statistics('lineno')
