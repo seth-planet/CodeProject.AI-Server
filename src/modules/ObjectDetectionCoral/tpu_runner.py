@@ -68,12 +68,13 @@ class TPUException(Exception):
 
 
 class DynamicInterpreter(object):
-    def __init__(self, fname_list: list, tpu_name: str, queues: list, rebalancing_lock: threading.Lock):
+    def __init__(self, fname_list: list, tpu_name: str, queues: list):
         self.fname_list = fname_list
         self.tpu_name = tpu_name
         self.queues = queues
-        self.rebalancing_lock = rebalancing_lock
 
+        # Keep track of how productive this TPU is
+        self.stats_lock = threading.Lock()
         self.timings    = [0.0] * len(fname_list)
         self.q_len      = [0] * len(fname_list)
         self.exec_count = [0] * len(fname_list)
@@ -108,79 +109,56 @@ class DynamicInterpreter(object):
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
 
-        # Start processing loop per TPU
-        self.thread = threading.Thread(target=self._interpreter_runner, args=[seg_idx])
-        self.thread.start()
-
-
-    def _interpreter_runner(self, seg_idx: int):
-        in_names  = [d['name']  for d in self.input_details ]
-        out_names = [d['name']  for d in self.output_details]
-        indices   = [d['index'] for d in self.output_details]
-        first_in_name = in_names.pop(0)
-
-        # Setup input/output queues
-        in_q = self.queues[seg_idx]
-        out_q = None
+        # Setup local interpreter vars
+        self.seg_idx = seg_idx
+        self.this_q = self.queues[seg_idx]
+        self.next_q = None
         if len(self.queues) > seg_idx+1:
-            out_q = self.queues[seg_idx+1]
-
-        # Input tensors for this interpreter
-        input_tensors = {}
-        for details in self.input_details:
-            input_tensors[details['name']] = self.interpreter.tensor(details['index'])
-        output_tensors = []
-        if not out_q:
-            for details in self.output_details:
-                output_tensors.append(self.interpreter.tensor(details['index']))
-
-        expected_input_size = np.prod(self.input_details[0]['shape'])
-        interpreter_handle = self.interpreter._native_handle()
-
-        # Run interpreter loop; consume & produce results
-        while True:
-            # Pull next input from the queue
-            working_tensors = in_q.get()
+            self.next_q = self.queues[seg_idx+1]
             
-            # Exit if the pipeline is done
-            if working_tensors is False:
-                logging.debug("Get EOF in tid {}".format(threading.get_ident()))
-                self.interpreter = None
-                self.input_details = None
-                self.output_details = None
-                if self.rebalancing_lock.locked():
-                    self.rebalancing_lock.release()
-                return
+        self.in_info  = [(d['name'], d['index'], self.interpreter.tensor(d['index'])) for d in self.input_details ]
+        self.out_info = [(d['name'], d['index'], self.interpreter.tensor(d['index'])) for d in self.output_details]
+        self.first_in_name, _ = self.in_info.pop(0)
 
-            start_inference_time = time.perf_counter_ns()
+        self.expected_input_size = np.prod(self.input_details[0]['shape'])
+        self.interpreter_handle = self.interpreter._native_handle()
 
-            # Set inputs beyond the first
-            for name in in_names:
-                input_tensors[name]()[0] = working_tensors[0][name]
+        # Add self to priority queue
+        self.this_q.push(self)
 
-            # Invoke_with_membuffer() directly on numpy memory,
-            # but only works with a single input
-            edgetpu.invoke_with_membuffer(interpreter_handle,
-                                          working_tensors[0][first_in_name].ctypes.data,
-                                          expected_input_size)
+    def invoke(working_tensors):
+        start_inference_time = time.perf_counter_ns()
 
-            if out_q:
-                # Fetch results
-                for name, index in zip(out_names, indices):
-                    working_tensors[0][name] = self.interpreter.get_tensor(index)
+        # Set inputs beyond the first
+        for name, _, t in self.in_info:
+            t()[0] = working_tensors[name]
 
-                # Deliver to next queue in pipeline
-                out_q.put(working_tensors)
-            else:
-                # Fetch pointer to results
-                # Copy and convert to float
-                # Deliver to final results queue
-                working_tensors[1].put([t().astype(np.float32) for t in output_tensors])
+        # Invoke_with_membuffer() directly on numpy memory,
+        # but only works with a single input
+        edgetpu.invoke_with_membuffer(self.interpreter_handle,
+                                      working_tensors[self.first_in_name].ctypes.data,
+                                      self.expected_input_size)
 
+        if self.next_q:
+            # Fetch results
+            for name, index, _ in self.out_info:
+                working_tensors[name] = self.interpreter.get_tensor(index)
+        else:
+            # Fetch pointer to results
+            # Copy and convert to float
+            output = [t().astype(np.float32) for _,_,t in self.out_info]
+
+        # Make TPU available for next round
+        self.this_q.put(self)
+
+        with self.stats_lock:
             # Convert elapsed time to double precision ms
-            self.timings[seg_idx] += (time.perf_counter_ns() - start_inference_time) / (1000.0 * 1000.0)
-            self.q_len[seg_idx] += in_q.qsize()
-            self.exec_count[seg_idx] += 1
+            self.timings[self.seg_idx] += (time.perf_counter_ns() - start_inference_time) / (1000.0 * 1000.0)
+            self.q_len[self.seg_idx] += in_q.qsize()
+            self.exec_count[self.seg_idx] += 1
+
+        # Return results
+        return self.next_q.get().invoke(working_tensors) if self.next_q else output
 
     def __del__(self):
         # Print performance info
@@ -203,6 +181,18 @@ class DynamicInterpreter(object):
         self.delegate = None
         self.queues = None
 
+    def __lt__(self, other):
+        """Allow interpreters to be sorted in a PriorityQueue by speed."""
+        selfPriority = 0.0
+        if self.exec_count[self.seg_idx] > 0:
+            selfPriority = self.timings[self.seg_idx] / self.exec_count[self.seg_idx]
+        
+        otherPriority = 0.0
+        if other.exec_count[other.seg_idx] > 0:
+            otherPriority = other.timings[other.seg_idx] / other.exec_count[other.seg_idx]
+        
+        return selfPriority < otherPriority
+
 
 class DynamicPipeline(object):
     
@@ -217,13 +207,10 @@ class DynamicPipeline(object):
         self.interpreters = [[]  for i in range(seg_count)]
 
         # Input queues for each segment; if we go over maxsize, something went wrong
-        self.queues = [queue.Queue(maxsize=self.max_pipeline_queue_length) for i in range(seg_count)]
+        self.queues = [queue.PriorityQueue(maxsize=self.max_pipeline_queue_length) for i in range(seg_count)]
 
         # Lock for internal reorganization
         self.balance_lock = threading.Lock()
-
-        # Lock for interpreter use
-        self.rebalancing_lock = threading.Lock()
 
         # Read file data
         self.fbytes_list = []
@@ -251,7 +238,7 @@ class DynamicPipeline(object):
         for i, tpu_name in enumerate(self.tpu_list):
             seg_idx = i % len(self.fname_list)
 
-            i = DynamicInterpreter(self.fname_list, tpu_name, self.queues, self.rebalancing_lock)
+            i = DynamicInterpreter(self.fname_list, tpu_name, self.queues)
             i.start(seg_idx, self.fbytes_list[seg_idx])
             self.interpreters[seg_idx].append(i)
 
@@ -261,12 +248,12 @@ class DynamicPipeline(object):
         logging.info(f"Initialized pipeline interpreters in {boot_time:.1f}ms")
 
 
-    def enqueue(self, in_tensor, out_q: queue.Queue):
+    def invoke(self, in_tensor):
         with self.balance_lock:
             if not self.first_name:
                 self._init_interpreters()
 
-        self.queues[0].put(({self.first_name: in_tensor}, out_q))
+        return self.queues[0].get().invoke({self.first_name: in_tensor})
 
 
     def _eval_timings(self, interpreter_counts):
@@ -399,29 +386,9 @@ class DynamicPipeline(object):
 
 
     def _rem_interpreter_from(self, interp_i):
-        # Sending False kills the processing loop
-        self.rebalancing_lock.acquire()
-        self.queues[interp_i].put(False)
-
-        # This is ugly, but I can't think of something better
-        # Threads are blocked by queues. Queues may not have a stream
-        # of work cycling them. Therefore must kill with an
-        # enqueued command. But we don't know which thread picks
-        # up the command from the queue.
-
-        # Block & wait
-        realloc_interp = None
-        with self.rebalancing_lock:
-            for idx, interpreter in enumerate(self.interpreters[interp_i]):
-                if not interpreter.interpreter:
-                    realloc_interp = self.interpreters[interp_i].pop(idx)
-                    break
-
-        if not realloc_interp:
-            logging.warning("Unable to find killed interpreter")
-            self.balance_lock.release()
-        return realloc_interp
-
+        interp = self.queues[interp_i].get()
+        self.interpreters[interp_i].remove(interp)
+        return interp
 
     def print_queue_len(self):
         len_str = ""
@@ -431,42 +398,18 @@ class DynamicPipeline(object):
             seg_str += " {:2}".format(len(i))
         logging.info(f"Queue len: ({len_str}); Segment alloc: ({seg_str})")
 
-
     def __del__(self):
         self.delete()
-
-
-    def _halt_interpreters(self, seg_idx: int):
-        
-        if not self.interpreters or seg_idx < 0 or seg_idx >= len(self.interpreters):
-            return
-        
-        # Insert EOF to each queue
-        for i in self.interpreters[seg_idx]:
-            self.queues[seg_idx].put(False)
-
-        # Wait for threads to finish
-        for interpreter in self.interpreters[seg_idx]:
-            t = interpreter.thread
-            logging.debug("Joining thread {} for DynamicPipeline.delete()".format(t.native_id))
-            t.join(timeout=MAX_WAIT_TIME)
-            if t.is_alive():
-                logging.warning("Pipe thread didn't join!")
-
 
     def delete(self):
         # Kill interpreters. Maybe refresh later; maybe delete object.
         with self.balance_lock:
-            # Insert EOF to each queue
-            # Wait for threads to finish
-            # Init structures
-            for q_idx, q in enumerate(self.queues):
-                self._halt_interpreters(q_idx)
-                self.queues[q_idx] = queue.Queue(maxsize=self.max_pipeline_queue_length)
+            # Init structure
+            for q_idx in range(len(self.queues)):
+                self.queues[q_idx] = queue.PriorityQueue(maxsize=self.max_pipeline_queue_length)
 
                 if self.interpreters and len(self.interpreters) > q_idx:
                     self.interpreters[q_idx] = []
-
         self.first_name = None
 
 
@@ -829,53 +772,43 @@ class TPURunner(object):
         all_objects = []
         all_queues  = []
         _, m_height, m_width, _ = self.input_details['shape']
-        
-        # Potentially resize & pipeline a number of tiles
-        for rs_image, rs_loc in self._get_tiles(options, image):
-            rs_queue = queue.Queue(maxsize=1)
-            all_queues.append((rs_queue, rs_loc))
-            logging.debug("Enqueuing tile in pipeline")
 
-            with self.runner_lock:
-                # Recreate the pipe if it is stale, but also check if we can
-                # and have created the pipe. It's not always successful...
-                (pipe_ok, error) = self._periodic_check(options)
-                if not pipe_ok:
-                    return None, 0, error
-
-            self.pipe.enqueue(rs_image, rs_queue)   
-
-        # Wait for the results here
-        tot_inference_time = 0
-        for rs_queue, rs_loc in all_queues:
-            # Wait for results
-            # We may have to wait a few seconds at most, but I'd expect the
-            # pipeline to clear fairly quickly.
-            start_inference_time = time.perf_counter()
-            result = rs_queue.get(timeout=MAX_WAIT_TIME)
-            tot_inference_time += time.perf_counter() - start_inference_time
-            assert result
-
-            boxes, class_ids, scores, count = self._decode_result(result, score_threshold)
+        with self.runner_lock:
+            # Recreate the pipe if it is stale, but also check if we can
+            # and have created the pipe. It's not always successful...
+            (pipe_ok, error) = self._periodic_check(options)
+            if not pipe_ok:
+                return None, 0, error
             
-            logging.debug("BBox scaling params: {}x{}, ({},{}), {:.2f}x{:.2f}".
-                format(m_width, m_height, *rs_loc))
-
-            # Create Objects for each valid result
-            for i in range(int(count[0])):
-                if scores[0][i] < score_threshold:
-                    continue
-                    
-                ymin, xmin, ymax, xmax = boxes[0][i]
+        # We can use a with statement to ensure threads are cleaned up promptly
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_inference = {executor.submit(self.pipe.invoke, rs_image): loc for rs_image, loc in self._get_tiles(options, image)}    
+                           
+            # Wait for the results here
+            start_inference_time = time.perf_counter()
+            for future in concurrent.futures.as_completed(future_to_inference):
+                rs_loc = future_to_inference[future]
+                boxes, class_ids, scores, count = self._decode_result(future.result(), score_threshold)
                 
-                bbox = detect.BBox(xmin=(max(xmin, 0.0)*m_width  + rs_loc[0])*rs_loc[2],
-                                   ymin=(max(ymin, 0.0)*m_height + rs_loc[1])*rs_loc[3],
-                                   xmax=(min(xmax, 1.0)*m_width  + rs_loc[0])*rs_loc[2],
-                                   ymax=(min(ymax, 1.0)*m_height + rs_loc[1])*rs_loc[3])
-
-                all_objects.append(detect.Object(id=int(class_ids[0][i]),
-                                                 score=float(scores[0][i]),
-                                                 bbox=bbox.map(int)))
+                logging.debug("BBox scaling params: {}x{}, ({},{}), {:.2f}x{:.2f}".
+                    format(m_width, m_height, *rs_loc))
+    
+                # Create Objects for each valid result
+                for i in range(int(count[0])):
+                    if scores[0][i] < score_threshold:
+                        continue
+                        
+                    ymin, xmin, ymax, xmax = boxes[0][i]
+                    
+                    bbox = detect.BBox(xmin=(max(xmin, 0.0)*m_width  + rs_loc[0])*rs_loc[2],
+                                       ymin=(max(ymin, 0.0)*m_height + rs_loc[1])*rs_loc[3],
+                                       xmax=(min(xmax, 1.0)*m_width  + rs_loc[0])*rs_loc[2],
+                                       ymax=(min(ymax, 1.0)*m_height + rs_loc[1])*rs_loc[3])
+    
+                    all_objects.append(detect.Object(id=int(class_ids[0][i]),
+                                                     score=float(scores[0][i]),
+                                                     bbox=bbox.map(int)))
+            tot_inference_time = time.perf_counter() - start_inference_time
         
         # Convert to ms
         tot_inference_time = int(tot_inference_time * 1000)
