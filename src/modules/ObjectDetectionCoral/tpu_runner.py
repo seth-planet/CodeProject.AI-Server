@@ -617,6 +617,10 @@ class TPURunner(object):
             self.input_details  = self.pipe.interpreters[0][0].input_details[0]
             self.output_details = self.pipe.interpreters[-1][0].output_details[0]
 
+            # Rescale the input from uint8 to the TPU input tensor
+            self.input_zero = float(self.input_details['quantization'][1])
+            self.input_scale = 1.0 / (255.0 * self.input_details['quantization'][0])
+
             # Print debug
             logging.info("{} device & segment counts: {} & {}"
                         .format(self.device_type,
@@ -1125,19 +1129,21 @@ class TPURunner(object):
         tiles_y = int(max(1, round(i_height / (options.downsample_by * m_height))))
         logging.debug("Chunking to {} x {} tiles".format(tiles_x, tiles_y))
 
-        # Fit image within target size
-        resamp_x = int(m_width  + (tiles_x - 1) * (m_width  - options.tile_overlap))
-        resamp_y = int(m_height + (tiles_y - 1) * (m_height - options.tile_overlap))
+        # Find target size for new image
+        resamp_x = m_width  + (tiles_x - 1) * (m_width  - options.tile_overlap)
+        resamp_y = m_height + (tiles_y - 1) * (m_height - options.tile_overlap)
+
+        # Find a scaled image size limiting to 10% distortion
+        if resamp_y / i_height > resamp_x / i_width:
+            fin_x = int(resamp_x)
+            fin_y = int(min(1.1 * i_height * resamp_x / i_width, resamp_y))
+        else:
+            fin_x = int(min(1.1 * i_width * resamp_y / i_height, resamp_x))
+            fin_y = int(resamp_y)
 
         # Chop & resize image piece
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
         image.thumbnail((resamp_x, resamp_y), Image.LANCZOS)
         logging.debug("Resizing to {} x {} for tiling".format(image.width, image.height))
-
-        # Rescale the input from uint8
-        input_zero = float(self.input_details['quantization'][1])
-        input_scale = 1.0 / (255.0 * self.input_details['quantization'][0])
 
         # It'd be useful to print this once at the beginning of the run
         key = "{} {}".format(*image.size)
@@ -1173,6 +1179,47 @@ class TPURunner(object):
 
 
         return tiles
+
+    def _autocontrast_scale_np(self, resized_img):
+        # Convert to gret for histogram
+        gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY)
+    
+        # Calculate grayscale histogram
+        hist = cv2.calcHist([gray],[0],None,[256],[0,256])
+        hist_size = len(hist)
+    
+        # Calculate cumulative distribution from the histogram
+        accumulator = []
+        accumulator.append(float(hist[0]))
+        for index in range(1, hist_size):
+            accumulator.append(accumulator[index -1] + float(hist[index]))
+    
+        # Locate points to clip
+        maximum = accumulator[-1]
+        clip_hist_percent = 10
+        clip_hist_percent *= (maximum/100.0)
+        clip_hist_percent /= 2.0
+    
+        # Locate left cut
+        minimum_gray = 0
+        while accumulator[minimum_gray] < clip_hist_percent:
+            minimum_gray += 1
+    
+        # Locate right cut
+        maximum_gray = hist_size -1
+        while accumulator[maximum_gray] >= (maximum - clip_hist_percent):
+            maximum_gray -= 1
+    
+        # Calculate alpha and beta values
+        alpha = 255.0 / (maximum_gray - minimum_gray)
+        beta = -minimum_gray * alpha
+
+        # Combine the image tile contrast adjustment with the input tensor scaling
+        # Then ensure it's dtype is correct (int8 or uint8)
+        return np.asarray(np.asarray(resized_img, np.float32) 
+                          * (alpha * self.input_scale)
+                          + (beta * self.input_scale + self.input_zero),
+                          dtype=self.input_details['dtype'])
 
 
     def _get_tiles(self, options: Options, image: Image):
