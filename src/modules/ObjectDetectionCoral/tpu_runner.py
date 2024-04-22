@@ -20,7 +20,6 @@ import platform
 import time
 import logging
 import queue
-import gc
 import math
 
 from datetime import datetime
@@ -1176,8 +1175,6 @@ class TPURunner(object):
                 resamp_info = (x_off, y_off, i_width/image.width, i_height/image.height)
 
                 tiles.append((cropped_arr.astype(self.input_details['dtype']), resamp_info))
-
-
         return tiles
 
     def _autocontrast_scale_np(self, resized_img):
@@ -1221,7 +1218,7 @@ class TPURunner(object):
                           + (beta * self.input_scale + self.input_zero),
                           dtype=self.input_details['dtype'])
 
-
+    
     def _get_tiles(self, options: Options, image: Image):
         """
         Returns an iterator that yields image tiles and associated location.
