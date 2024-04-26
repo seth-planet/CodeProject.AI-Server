@@ -1153,10 +1153,9 @@ class TPURunner(object):
         for x_off in range(0, max(img_w - m_width, 0) + tiles_x, step_x):
             for y_off in range(0, max(img_h - m_height, 0) + tiles_y, step_y):
                 # Adjust contrast on a per-chunk basis; we will likely be quantizing the image during scaling
-                cropped_arr = self._pil_autocontrast_scale_np(image.crop((x_off,
-                                                                          y_off,
-                                                                          x_off + m_width,
-                                                                          y_off + m_height)))
+                cropped_arr = self._pil_autocontrast_scale_np(image, (x_off, y_off,
+                                                                      x_off + m_width,
+                                                                      y_off + m_height))
 
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
                 resamp_info = (x_off, y_off, i_width/img_w, i_height/img_h)
@@ -1166,13 +1165,15 @@ class TPURunner(object):
                 # Image.fromarray((tiles[-1][0] + 128).astype(np.uint8)).save(f"test_{x_off}_{y_off}.png")
         return tiles
 
-    def _pil_autocontrast_scale_np(self, resized_img):
-        image_chunk = ImageOps.autocontrast(resized_img, 1)
+    def _pil_autocontrast_scale_np(self, image, crop_dim):
+        image_chunk = ImageOps.autocontrast(image.crop(crop_dim), 1)
         return np.asarray(image_chunk, np.float32) * self.input_scale + self.input_zero)
 
-    def _cv_autocontrast_scale_np(self, resized_img):
+    def _cv_autocontrast_scale_np(self, image, crop_dim):
+        cropped_img = image[crop_dim[1]:crop_dim[3],crop_dim[0],crop_dim[2]]
+        
         # Convert to gret for histogram
-        gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2GRAY)
     
         # Calculate grayscale histogram
         hist = cv2.calcHist([gray],[0],None,[256],[0,256])
@@ -1205,9 +1206,11 @@ class TPURunner(object):
         beta = -minimum_gray * alpha
 
         # Combine the image tile contrast adjustment with the input tensor scaling.
-        # An advantage of doing this in one operation is both reducing quantization
-        # error and not clamping dynamic range before scaling the input tensor.
-        return np.asarray(resized_img, np.float32) \
+        # Advantages of doing this here in one step is:
+        # - Reducing quantization error.
+        # - Not clamping dynamic range to uint8 before scaling to the input tensor.
+        # - Fewer operations per pixel.
+        return np.asarray(cropped_img, np.float32) \
                   * (alpha * self.input_scale) \
                   + (beta * self.input_scale + self.input_zero)
 
