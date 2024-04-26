@@ -1204,8 +1204,7 @@ class TPURunner(object):
         alpha = 255.0 / (maximum_gray - minimum_gray)
         beta = -minimum_gray * alpha
 
-        # Combine the image tile contrast adjustment with the input tensor scaling
-        # Then ensure it's dtype is correct (int8 or uint8).
+        # Combine the image tile contrast adjustment with the input tensor scaling.
         # An advantage of doing this in one operation is both reducing quantization
         # error and not clamping dynamic range before scaling the input tensor.
         return np.asarray(resized_img, np.float32) \
