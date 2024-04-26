@@ -1170,7 +1170,7 @@ class TPURunner(object):
         return np.asarray(image_chunk, np.float32) * self.input_scale + self.input_zero)
 
     def _cv_autocontrast_scale_np(self, image, crop_dim):
-        cropped_img = image[crop_dim[1]:crop_dim[3],crop_dim[0],crop_dim[2]]
+        cropped_img = image[crop_dim[1]:crop_dim[3],crop_dim[0]:crop_dim[2]]
         
         # Convert to gret for histogram
         gray = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2GRAY)
