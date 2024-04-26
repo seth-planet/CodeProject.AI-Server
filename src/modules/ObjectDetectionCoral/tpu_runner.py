@@ -1104,22 +1104,8 @@ class TPURunner(object):
                                m_height: int):
         """
         Image resizing is one of the more expensive things we're doing here.
-        It's expensive enough that it may take as much CPU time as inference
-        under some circumstances. The Lanczos resampling kernel in particular
-        is expensive, but results in quality output.
-        
-        For example, see the resizing performance charts here:
-        https://python-pillow.org/pillow-perf
-        
-        Pillow is the highly optimized version of PIL and it only runs at
-        ~100 MP/sec when making a thumbnail with the Lanczos kernel. That's
-        only 12.6 4k frames per second, maximum, in a Python process. We are
-        hoping to process more than that with TPU hardware.
-        
-        We can also improve performance by installing
-        the 'pillow-simd' Python library. And improve it even more by
-        re-compiling it to use AVX2 instructions. See:
-        https://github.com/uploadcare/pillow-simd#pillow-simd
+        It's expensive enough that it may take more wall time than inference
+        under some circumstances.
         """
         i_width, i_height = image.size
 
@@ -1142,7 +1128,10 @@ class TPURunner(object):
 
         # Chop & resize image piece
         image.thumbnail((resamp_x, resamp_y), Image.LANCZOS)
-        logging.debug("Resizing to {} x {} for tiling".format(image.width, image.height))
+        img_h, img_w = image.height, image.width
+        #image = cv2.resize(image, (output_width, output_height), interpolation=cv2.INTER_AREA)
+        #img_h, img_w = image.shape[0], image.shape[1]
+        logging.debug("Resizing to {} x {} for tiling".format(img_w, img_h))
 
         # It'd be useful to print this once at the beginning of the run
         key = "{} {}".format(*image.size)
@@ -1156,28 +1145,32 @@ class TPURunner(object):
         tiles = []
         step_x = 1
         if tiles_x > 1:
-            step_x = int(math.ceil((image.width - m_width)/(tiles_x-1)))
+            step_x = int(math.ceil((img_w - m_width)/(tiles_x-1)))
         step_y = 1
         if tiles_y > 1:
-            step_y = int(math.ceil((image.height - m_height)/(tiles_y-1)))
+            step_y = int(math.ceil((img_h - m_height)/(tiles_y-1)))
 
-        for x_off in range(0, max(image.width - m_width, 0) + tiles_x, step_x):
-            for y_off in range(0, max(image.height - m_height, 0) + tiles_y, step_y):
+        for x_off in range(0, max(img_w - m_width, 0) + tiles_x, step_x):
+            for y_off in range(0, max(img_h - m_height, 0) + tiles_y, step_y):
                 # Adjust contrast on a per-chunk basis; we will likely be quantizing the image during scaling
-                image_chunk = ImageOps.autocontrast(image.crop((x_off,
-                                                                y_off,
-                                                                x_off + m_width,
-                                                                y_off + m_height)), 1)
-                # Normalize to whatever the input is
-                cropped_arr = np.asarray(image_chunk, np.float32) * input_scale + input_zero
+                cropped_arr = self._pil_autocontrast_scale_np(image.crop((x_off,
+                                                                          y_off,
+                                                                          x_off + m_width,
+                                                                          y_off + m_height)))
 
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
-                resamp_info = (x_off, y_off, i_width/image.width, i_height/image.height)
+                resamp_info = (x_off, y_off, i_width/img_w, i_height/img_h)
 
-                tiles.append((cropped_arr.astype(self.input_details['dtype']), resamp_info))
+                tiles.append((np.asarray(cropped_arr, dtype=self.input_details['dtype']), resamp_info))
+                # Debug:
+                # Image.fromarray((tiles[-1][0] + 128).astype(np.uint8)).save(f"test_{x_off}_{y_off}.png")
         return tiles
 
-    def _autocontrast_scale_np(self, resized_img):
+    def _pil_autocontrast_scale_np(self, resized_img):
+        image_chunk = ImageOps.autocontrast(resized_img, 1)
+        return np.asarray(image_chunk, np.float32) * self.input_scale + self.input_zero)
+
+    def _cv_autocontrast_scale_np(self, resized_img):
         # Convert to gret for histogram
         gray = cv2.cvtColor(resized_img, cv2.COLOR_BGR2GRAY)
     
@@ -1212,11 +1205,12 @@ class TPURunner(object):
         beta = -minimum_gray * alpha
 
         # Combine the image tile contrast adjustment with the input tensor scaling
-        # Then ensure it's dtype is correct (int8 or uint8)
-        return np.asarray(np.asarray(resized_img, np.float32) 
-                          * (alpha * self.input_scale)
-                          + (beta * self.input_scale + self.input_zero),
-                          dtype=self.input_details['dtype'])
+        # Then ensure it's dtype is correct (int8 or uint8).
+        # An advantage of doing this in one operation is both reducing quantization
+        # error and not clamping dynamic range before scaling the input tensor.
+        return np.asarray(resized_img, np.float32) \
+                  * (alpha * self.input_scale) \
+                  + (beta * self.input_scale + self.input_zero)
 
     
     def _get_tiles(self, options: Options, image: Image):
