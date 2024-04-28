@@ -230,7 +230,7 @@ class DynamicPipeline(object):
 
     def _init_interpreters(self):
         # Set a Time To Live for balancing so we don't thrash
-        self.balance_ttl  = len(self.tpu_list) * 2
+        self.balance_ttl  = len(self.tpu_list) * 3
         start_boot_time = time.perf_counter_ns()
 
         # Fill TPUs with interpreters
@@ -325,11 +325,13 @@ class DynamicPipeline(object):
                 new_swap_t = 0.0
                 if i.exec_count[interp_i] > VALID_CNT_THRESH:
                     new_swap_t = i.timings[interp_i] / i.exec_count[interp_i] 
+                
+                #print(f"i {interp_i} t {max_i} cnt {i.exec_count[max_i]} mt {max_t} nmt {new_max_t} nst {new_swap_t}")
 
                 # If TPU has already found to be faster on this segment
                 # and we aren't making the other segment the new worst
                 # and we are choosing the best available candidate.
-                if max_t-0.5 > new_max_t and max_t > new_swap_t and swap_t > new_max_t:
+                if min(max_t-0.5, max_t*0.99) > new_max_t and max_t > new_swap_t and swap_t > new_max_t:
                     swap_i = interp_i
                     swap_t = new_max_t 
 
@@ -361,8 +363,8 @@ class DynamicPipeline(object):
         elif swap_i is not None:
             # 2nd Priority: Swap slow segments with faster ones to see if we can
             # run them faster. Hopefully still a good way to optimize for
-            # heterogenous hardware.
-            logging.info(f"Auto-tuning between queues {swap_i} and {max_i}")
+            # heterogeneous hardware.
+            logging.info(f"Auto-tuning queues {swap_i} and {max_i}")
 
             # Stop them
             new_max  = self._rem_interpreter_from(swap_i)
@@ -475,11 +477,11 @@ class TPURunner(object):
     def _watchdog(self):
         self.watchdog_time = time.time()
         while not self.watchdog_shutdown:
-            if self.pipe and self.pipe.first_name is None and \
+            if self.pipe and self.pipe.first_name is not None and \
                 time.time() - self.watchdog_time > self.max_idle_secs_before_recycle:
                 logging.warning("No work in {} seconds, watchdog shutting down TPUs.".format(self.max_idle_secs_before_recycle))
                 self.runner_lock.acquire(timeout=MAX_WAIT_TIME)
-                if self.pipe:
+                if self.pipe.first_name is not None:
                     self.pipe.delete()
                 self.runner_lock.release()
                 # Pipeline will reinitialize itself as needed
@@ -508,9 +510,9 @@ class TPURunner(object):
                 ['usb:%d' % i for i in range(max(0, len(edge_tpus) - num_pci_devices))]
 
         if tpu_limit > 0:
-            return tpu_l[:tpu_limit]
+            return tpu_l[3:3+tpu_limit]
         else:
-            return tpu_l
+            return tpu_l[3:]
 
 
     def _get_model_filenames(self, options: Options, tpu_list: list) -> list:
@@ -531,7 +533,7 @@ class TPURunner(object):
         device_count  = len(tpu_list)  # TPUs. We've at least found one
         self.device_type   = 'Multi-TPU'
         if device_count == 1:
-            self.device_type   = 'TPU'
+            self.device_type   = 'Single TPU'
 
         # If TPU found then default is single TPU model file (no segments)
         if not any(options.tpu_segments_lists) or device_count == 1:
@@ -916,7 +918,7 @@ class TPURunner(object):
             inds = np.where(ovr <= thresh)[0]
             order = order[inds + 1]
 
-        return np.array(keep)
+        return np.asarray(keep)
 
 
     def _yolov8_non_max_suppression(self, prediction, conf_thres=0.25, iou_thres=0.45,
@@ -1054,7 +1056,7 @@ class TPURunner(object):
         if len(objects) == 1:
             return [0]
 
-        boxes = np.array([o.bbox for o in objects])
+        boxes = np.asarray([o.bbox for o in objects])
         x_mins = boxes[:, 0]
         y_mins = boxes[:, 1]
         x_maxs = boxes[:, 2]

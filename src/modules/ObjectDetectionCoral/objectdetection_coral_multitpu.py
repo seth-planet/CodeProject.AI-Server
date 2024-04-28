@@ -231,9 +231,11 @@ def main():
   
   thread_cnt = 16
   tot_infr_time = 0 
+
   half_wall_start = None
   half_infr_count = 0 
   start = time.perf_counter()
+
   if args.count > 1:
     with concurrent.futures.ThreadPoolExecutor(max_workers=thread_cnt) as executor:
       for chunk_i in range(0, args.count-1, thread_cnt*8):
@@ -243,11 +245,11 @@ def main():
           _, infr_time, _ = f.result()
           tot_infr_time += infr_time
 
-          # Start a timer for the last ~half of the run for more accurate benchmark
-          if chunk_i > (args.count-1) / 2.0:
-            half_infr_count += 1
-            if half_wall_start is None:
-              half_wall_start = time.perf_counter()
+          # Start a timer for the last ~quarter of the run for more accurate benchmark
+          if chunk_i > (args.count-1) * 3.0 / 4.0:
+            q_infr_count += 1
+            if q_wall_start is None:
+              q_wall_start = time.perf_counter()
         
         # Uncomment for testing
         # import random
@@ -262,12 +264,12 @@ def main():
   start_one = time.perf_counter()
   objs, infr_time, _ = _tpu_runner.process_image(options, copy.copy(image), args.threshold)
   tot_infr_time += infr_time
-  half_infr_count += 1
+  q_infr_count += 1
   wall_time = time.perf_counter() - start
 
-  half_wall_time = 0.0
-  if half_wall_start is not None:
-    half_wall_time = time.perf_counter() - half_wall_start
+  q_wall_time = 0.0
+  if q_wall_start is not None:
+    q_wall_time = time.perf_counter() - q_wall_start
   
   logging.info('completed one run every %.2fms for %d runs; %.2fms wall time for a single run' %
                             (wall_time * 1000 / args.count, args.count,
@@ -275,7 +277,7 @@ def main():
                             
   logging.info('%.2fms avg time blocked across %d threads; %.3fms ea for final %d inferences' %
                             (tot_infr_time / args.count, thread_cnt,
-                             half_wall_time * 1000 / half_infr_count, half_infr_count))
+                             q_wall_time * 1000 / q_infr_count, q_infr_count))
 
   logging.info('-------RESULTS--------')
   if not objs:
@@ -293,7 +295,7 @@ def main():
     image = image.convert('RGB')
     draw_objects(ImageDraw.Draw(image), objs, _tpu_runner.labels)
     image.save(args.output, subsampling=2, quality=95)
-    #image.show()
+    image.show()
 
 
 if __name__ == '__main__':

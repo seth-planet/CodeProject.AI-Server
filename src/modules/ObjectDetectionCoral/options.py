@@ -266,7 +266,7 @@ class Options:
         self.MIN_CONFIDENCE                     = 0.5
         self.INTERPRETER_LIFESPAN_SECONDS       = 3600.0
         self.WATCHDOG_IDLE_SECS                 = 5.0       # To be added to non-multi code
-        self.MAX_IDLE_SECS_BEFORE_RECYCLE       = 60.0      # To be added to non-multi code
+        self.MAX_IDLE_SECS_BEFORE_RECYCLE       = 600.0     # To be added to non-multi code
         self.WARN_TEMPERATURE_THRESHOLD_CELSIUS = 80        # PCIe && Linux only
 
         self.MAX_PIPELINE_QUEUE_LEN             = 1000      # Multi-only
