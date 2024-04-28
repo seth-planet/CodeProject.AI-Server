@@ -635,7 +635,7 @@ class TPURunner(object):
                                 len(self.pipe.fname_list)))
             logging.debug(f"Input details: {self.input_details}")
             logging.debug(f"Output details: {self.output_details}")
-        cv2.setNumThreads(4)
+        cv2.setNumThreads(2)
 
         return (self.device_type, error)
 
@@ -1134,8 +1134,8 @@ class TPURunner(object):
         else:
             fin_x = int(min(1.1 * i_width * resamp_y / i_height, resamp_x))
             fin_y = int(resamp_y)
-        fin_x = 640
-        fin_y = 416
+        fin_x = m_width
+        fin_y = m_height
 
         # Chop & resize image piece
         #image.thumbnail((resamp_x, resamp_y), Image.LANCZOS)
@@ -1184,7 +1184,7 @@ class TPURunner(object):
     def _cv_autocontrast_scale_np(self, image, crop_dim):
         cropped_img = image[crop_dim[1]:crop_dim[3],crop_dim[0]:crop_dim[2]]
 
-        #return np.asarray(cropped_img, np.float32) * self.input_scale + self.input_zero
+        return np.asarray(cropped_img, np.float32) * self.input_scale + self.input_zero
         
         # Convert to gret for histogram
         gray = cv2.cvtColor(cropped_img, cv2.COLOR_RGB2GRAY)
