@@ -22,6 +22,7 @@ import logging
 import queue
 import math
 
+import concurrent.futures
 from datetime import datetime
 
 import numpy as np
@@ -117,15 +118,15 @@ class DynamicInterpreter(object):
             
         self.in_info  = [(d['name'], d['index'], self.interpreter.tensor(d['index'])) for d in self.input_details ]
         self.out_info = [(d['name'], d['index'], self.interpreter.tensor(d['index'])) for d in self.output_details]
-        self.first_in_name, _ = self.in_info.pop(0)
+        self.first_in_name, _, _ = self.in_info.pop(0)
 
         self.expected_input_size = np.prod(self.input_details[0]['shape'])
         self.interpreter_handle = self.interpreter._native_handle()
 
         # Add self to priority queue
-        self.this_q.push(self)
+        self.this_q.put(self)
 
-    def invoke(working_tensors):
+    def invoke(self, working_tensors):
         start_inference_time = time.perf_counter_ns()
 
         # Set inputs beyond the first
@@ -153,7 +154,7 @@ class DynamicInterpreter(object):
         with self.stats_lock:
             # Convert elapsed time to double precision ms
             self.timings[self.seg_idx] += (time.perf_counter_ns() - start_inference_time) / (1000.0 * 1000.0)
-            self.q_len[self.seg_idx] += in_q.qsize()
+            self.q_len[self.seg_idx] += self.this_q.qsize()
             self.exec_count[self.seg_idx] += 1
 
         # Return results
@@ -438,9 +439,6 @@ class TPURunner(object):
         self.model_name           = None  # Name of current model in use
         self.model_size           = None  # Size of current model in use
         self.labels               = None  # set of labels for this model
-
-        self.runner_lock          = threading.Lock()
-        self.executor             = concurrent.futures.ThreadPoolExecutor(max_workers=32)
         
         self.last_check_time      = None
         self.printed_shape_map    = {}
@@ -449,6 +447,9 @@ class TPURunner(object):
         self.watchdog_shutdown    = False
         self.watchdog_thread      = threading.Thread(target=self._watchdog)
         self.watchdog_thread.start()
+
+        self.runner_lock          = threading.Lock()
+        self.executor             = concurrent.futures.ThreadPoolExecutor(max_workers=32)
 
         logging.info(f"edgetpu version: {edgetpu.get_runtime_version()}")
         logging.info(f"{Image.__name__} version: {Image.__version__}")
@@ -587,15 +588,15 @@ class TPURunner(object):
             self.pipe = DynamicPipeline(tpu_list, tpu_model_files)
         except TPUException as tpu_ex:
             self.pipe = None
-            logging.warning(f"TPU Exception creating interpreter: {tpu_ex}")
+            logging.exception(f"TPU Exception creating interpreter: {tpu_ex}")
             error = "Failed to create interpreter (Coral issue)"
         except FileNotFoundError as ex:
             self.pipe = None
-            logging.warning(f"Model file not found: {ex}")
+            logging.exception(f"Model file not found: {ex}")
             error = "Model file not found. Please download the model if possible"
         except Exception as ex:
             self.pipe = None
-            logging.warning(f"Exception creating interpreter: {ex}")
+            logging.exception(f"Exception creating interpreter: {ex}")
             error = "Unable to create the interpreter"
 
         if not self.pipe:
@@ -1169,7 +1170,7 @@ class TPURunner(object):
 
     def _pil_autocontrast_scale_np(self, image, crop_dim):
         image_chunk = ImageOps.autocontrast(image.crop(crop_dim), 1)
-        return np.asarray(image_chunk, np.float32) * self.input_scale + self.input_zero)
+        return np.asarray(image_chunk, np.float32) * self.input_scale + self.input_zero
 
     def _cv_autocontrast_scale_np(self, image, crop_dim):
         cropped_img = image[crop_dim[1]:crop_dim[3],crop_dim[0]:crop_dim[2]]

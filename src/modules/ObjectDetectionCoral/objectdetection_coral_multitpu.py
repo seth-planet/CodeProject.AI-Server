@@ -231,6 +231,8 @@ def main():
   
   thread_cnt = 16
   tot_infr_time = 0 
+  q_infr_count = 0
+  q_wall_start = None
 
   half_wall_start = None
   half_infr_count = 0 
