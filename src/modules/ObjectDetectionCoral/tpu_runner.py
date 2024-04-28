@@ -21,6 +21,7 @@ import time
 import logging
 import queue
 import math
+import cv2
 
 import concurrent.futures
 from datetime import datetime
@@ -406,12 +407,15 @@ class DynamicPipeline(object):
     def delete(self):
         # Kill interpreters. Maybe refresh later; maybe delete object.
         with self.balance_lock:
-            # Init structure
-            for q_idx in range(len(self.queues)):
-                self.queues[q_idx] = queue.PriorityQueue(maxsize=self.max_pipeline_queue_length)
+            # Empty interpreter queues
+            for q in self.queues:
+                while not q.empty():
+                    q.get()
 
-                if self.interpreters and len(self.interpreters) > q_idx:
-                    self.interpreters[q_idx] = []
+            # Empty interpreter lists
+            for i_list in self.interpreters:
+                i_list.clear()
+
         self.first_name = None
 
 
@@ -784,13 +788,13 @@ class TPURunner(object):
                 return None, 0, error
 
         tiles = self._get_tiles(options, image)
-                           
+
         start_inference_time = time.perf_counter()
         all_objects = []
         if len(tiles) > 1:
             # Submit tile processing to thread pool
-            future_to_inference = {self.executor.submit(self.pipe.invoke, image): loc for image, loc in tiles}    
-                           
+            future_to_inference = {self.executor.submit(self.pipe.invoke, image): loc for image, loc in tiles}
+
             # Wait for the results here
             for future in concurrent.futures.as_completed(future_to_inference):
                 self._rs_to_obj(future.result(), score_threshold, all_objects, future_to_inference[future])
@@ -1102,7 +1106,7 @@ class TPURunner(object):
         
     def _resize_and_chop_tiles(self,
                                options: Options,
-                               image: Image,
+                               image_full: Image,
                                m_width: int,
                                m_height: int):
         """
@@ -1110,7 +1114,7 @@ class TPURunner(object):
         It's expensive enough that it may take more wall time than inference
         under some circumstances.
         """
-        i_width, i_height = image.size
+        i_height, i_width, _ = image_full.shape
 
         # What tile dim do we want?
         tiles_x = int(max(1, round(i_width / (options.downsample_by * m_width))))
@@ -1128,19 +1132,21 @@ class TPURunner(object):
         else:
             fin_x = int(min(1.1 * i_width * resamp_y / i_height, resamp_x))
             fin_y = int(resamp_y)
+        fin_x = 640
+        fin_y = 416
 
         # Chop & resize image piece
-        image.thumbnail((resamp_x, resamp_y), Image.LANCZOS)
-        img_h, img_w = image.height, image.width
-        #image = cv2.resize(image, (output_width, output_height), interpolation=cv2.INTER_AREA)
-        #img_h, img_w = image.shape[0], image.shape[1]
-        logging.debug("Resizing to {} x {} for tiling".format(img_w, img_h))
+        #image.thumbnail((resamp_x, resamp_y), Image.LANCZOS)
+        #img_h, img_w = image.height, image.width
+        image = cv2.resize(image_full, (fin_x, fin_y), interpolation=cv2.INTER_AREA)
+        img_h, img_w, _ = image.shape
+        logging.debug(f"Resizing to {img_w}x{img_h} for tiling ({m_width}x{m_height} target)")
 
         # It'd be useful to print this once at the beginning of the run
-        key = "{} {}".format(*image.size)
+        key = "{} {} {}".format(*image.shape)
         if key not in self.printed_shape_map:
             logging.info(
-                "Mapping {} image to {}x{} tiles".format(image.size, tiles_x, tiles_y))
+                f"Mapping {img_w}x{img_h} ({m_width}x{m_height} target) image to {tiles_x}x{tiles_y} tiles")
             self.printed_shape_map[key] = True
 
         # Do chunking
@@ -1156,16 +1162,17 @@ class TPURunner(object):
         for x_off in range(0, max(img_w - m_width, 0) + tiles_x, step_x):
             for y_off in range(0, max(img_h - m_height, 0) + tiles_y, step_y):
                 # Adjust contrast on a per-chunk basis; we will likely be quantizing the image during scaling
-                cropped_arr = self._pil_autocontrast_scale_np(image, (x_off, y_off,
-                                                                      x_off + m_width,
-                                                                      y_off + m_height))
+                cropped_arr = self._cv_autocontrast_scale_np(image, (x_off, y_off,
+                                                                     x_off + m_width,
+                                                                     y_off + m_height))
 
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
                 resamp_info = (x_off, y_off, i_width/img_w, i_height/img_h)
 
                 tiles.append((np.asarray(cropped_arr, dtype=self.input_details['dtype']), resamp_info))
+
                 # Debug:
-                # Image.fromarray((tiles[-1][0] + 128).astype(np.uint8)).save(f"test_{x_off}_{y_off}.png")
+                #Image.fromarray((tiles[-1][0] + 128).astype(np.uint8)).save(f"test_{x_off}_{y_off}.png")
         return tiles
 
     def _pil_autocontrast_scale_np(self, image, crop_dim):
@@ -1190,7 +1197,7 @@ class TPURunner(object):
     
         # Locate points to clip
         maximum = accumulator[-1]
-        clip_hist_percent = 10
+        clip_hist_percent = 0
         clip_hist_percent *= (maximum/100.0)
         clip_hist_percent /= 2.0
     

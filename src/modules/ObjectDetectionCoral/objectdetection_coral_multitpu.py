@@ -42,6 +42,7 @@ import logging
 import os
 import threading
 import time
+import cv2
 #import tracemalloc
 
 from PIL import Image
@@ -220,7 +221,8 @@ def main():
   options.downsample_by  = 100
   
   options.label_file = args.labels
-  image = Image.open(args.input)
+  #image = Image.open(args.input)
+  image = cv2.imread(args.input, cv2.IMREAD_COLOR)
   init_detect(options, args.num_tpus)
 
   print('----INFERENCE TIME----')
@@ -294,7 +296,7 @@ def main():
       logging.info(f'  bbox:  {obj.bbox}')
   
   if args.output:
-    image = image.convert('RGB')
+    image = Image.fromarray(image)
     draw_objects(ImageDraw.Draw(image), objs, _tpu_runner.labels)
     image.save(args.output, subsampling=2, quality=95)
     image.show()
