@@ -457,6 +457,7 @@ class TPURunner(object):
 
         logging.info(f"edgetpu version: {edgetpu.get_runtime_version()}")
         logging.info(f"{Image.__name__} version: {Image.__version__}")
+        logging.info(f"OpenCV version: {cv2.__version__}")
 
         # Find the temperature file
         # https://coral.ai/docs/pcie-parameters/
@@ -634,6 +635,7 @@ class TPURunner(object):
                                 len(self.pipe.fname_list)))
             logging.debug(f"Input details: {self.input_details}")
             logging.debug(f"Output details: {self.output_details}")
+        cv2.setNumThreads(4)
 
         return (self.device_type, error)
 
@@ -1181,9 +1183,11 @@ class TPURunner(object):
 
     def _cv_autocontrast_scale_np(self, image, crop_dim):
         cropped_img = image[crop_dim[1]:crop_dim[3],crop_dim[0]:crop_dim[2]]
+
+        #return np.asarray(cropped_img, np.float32) * self.input_scale + self.input_zero
         
         # Convert to gret for histogram
-        gray = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(cropped_img, cv2.COLOR_RGB2GRAY)
     
         # Calculate grayscale histogram
         hist = cv2.calcHist([gray],[0],None,[256],[0,256])
