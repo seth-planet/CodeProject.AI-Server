@@ -222,7 +222,7 @@ def main():
   
   options.label_file = args.labels
   #image = Image.open(args.input)
-  image = cv2.cvtColor(cv2.imread(args.input, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+  image = cv2.imread(args.input, cv2.IMREAD_COLOR)
   init_detect(options, args.num_tpus)
 
   print('----INFERENCE TIME----')

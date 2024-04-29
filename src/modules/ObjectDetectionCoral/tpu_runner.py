@@ -635,7 +635,10 @@ class TPURunner(object):
                                 len(self.pipe.fname_list)))
             logging.debug(f"Input details: {self.input_details}")
             logging.debug(f"Output details: {self.output_details}")
-        cv2.setNumThreads(2)
+
+        # Reduce OpenCV usage of threads
+        if os.cpu_count() is not None:
+            cv2.setNumThreads(os.cpu_count())
 
         return (self.device_type, error)
 
@@ -1134,21 +1137,17 @@ class TPURunner(object):
         else:
             fin_x = int(min(1.1 * i_width * resamp_y / i_height, resamp_x))
             fin_y = int(resamp_y)
-        fin_x = m_width
-        fin_y = m_height
 
         # Chop & resize image piece
-        #image.thumbnail((resamp_x, resamp_y), Image.LANCZOS)
-        #img_h, img_w = image.height, image.width
-        image = cv2.resize(image_full, (fin_x, fin_y), interpolation=cv2.INTER_AREA)
+        image = cv2.cvtColor(cv2.resize(image_full, (fin_x, fin_y), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
         img_h, img_w, _ = image.shape
-        logging.debug(f"Resizing to {img_w}x{img_h} for tiling ({m_width}x{m_height} target)")
+        logging.debug(f"Resizing to {img_w}x{img_h} for tiling ({m_width}x{m_height} tensor)")
 
         # It'd be useful to print this once at the beginning of the run
         key = "{} {} {}".format(*image.shape)
         if key not in self.printed_shape_map:
             logging.info(
-                f"Mapping {img_w}x{img_h} ({m_width}x{m_height} target) image to {tiles_x}x{tiles_y} tiles")
+                f"Mapping {img_w}x{img_h} ({m_width}x{m_height} tensor) image to {tiles_x}x{tiles_y} tiles")
             self.printed_shape_map[key] = True
 
         # Do chunking
@@ -1171,10 +1170,20 @@ class TPURunner(object):
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
                 resamp_info = (x_off, y_off, i_width/img_w, i_height/img_h)
 
-                tiles.append((np.asarray(cropped_arr, dtype=self.input_details['dtype']), resamp_info))
+                # Cast and clip
+                tile_arr = np.empty(cropped_arr.shape, dtype=self.input_details['dtype'])
+                dinfo = np.iinfo(self.input_details['dtype'])
+                np.clip(cropped_arr, dinfo.min, dinfo.max, out=tile_arr, casting='unsafe')
+
+                # Ensure this is tensor-ready
+                tile_height, tile_width, tile_c = tile_arr.shape
+                if tile_width != m_width or tile_height != m_height:
+                    tile_arr = np.pad(tile_arr, ((0, m_height - tile_height), (0, m_width - tile_width), (0, 0)))
+
+                tiles.append((tile_arr, resamp_info))
 
                 # Debug:
-                #Image.fromarray((tiles[-1][0] + 128).astype(np.uint8)).save(f"test_{x_off}_{y_off}.png")
+                #Image.fromarray((tiles[-1][0]).astype(np.uint8)).save(f"test_{x_off}_{y_off}.png")
         return tiles
 
     def _pil_autocontrast_scale_np(self, image, crop_dim):
@@ -1184,8 +1193,6 @@ class TPURunner(object):
     def _cv_autocontrast_scale_np(self, image, crop_dim):
         cropped_img = image[crop_dim[1]:crop_dim[3],crop_dim[0]:crop_dim[2]]
 
-        return np.asarray(cropped_img, np.float32) * self.input_scale + self.input_zero
-        
         # Convert to gret for histogram
         gray = cv2.cvtColor(cropped_img, cv2.COLOR_RGB2GRAY)
     
@@ -1201,7 +1208,7 @@ class TPURunner(object):
     
         # Locate points to clip
         maximum = accumulator[-1]
-        clip_hist_percent = 0
+        clip_hist_percent = 20 # == 20% pixels outside nominal input tensor range
         clip_hist_percent *= (maximum/100.0)
         clip_hist_percent /= 2.0
     
