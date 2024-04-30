@@ -75,10 +75,11 @@ class DynamicInterpreter(object):
         self.queues = queues
 
         # Keep track of how productive this TPU is
-        self.stats_lock = threading.Lock()
-        self.timings    = [0.0] * len(fname_list)
-        self.q_len      = [0] * len(fname_list)
-        self.exec_count = [0] * len(fname_list)
+        self.stats_lock  = threading.Lock()
+        self.output_lock = threading.Lock()
+        self.timings     = [0.0] * len(fname_list)
+        self.q_len       = [0] * len(fname_list)
+        self.exec_count  = [0] * len(fname_list)
 
         try:
             self.delegate = edgetpu.load_edgetpu_delegate({'device': tpu_name})
@@ -134,23 +135,25 @@ class DynamicInterpreter(object):
         for name, _, t in self.in_info:
             t()[0] = working_tensors[name]
 
-        # Invoke_with_membuffer() directly on numpy memory,
-        # but only works with a single input
-        edgetpu.invoke_with_membuffer(self.interpreter_handle,
-                                      working_tensors[self.first_in_name].ctypes.data,
-                                      self.expected_input_size)
+        # The next thread needs to wait for us to finish copying the output
+        with self.output_lock:
+            # Invoke_with_membuffer() directly on numpy memory,
+            # but only works with a single input
+            edgetpu.invoke_with_membuffer(self.interpreter_handle,
+                                          working_tensors[self.first_in_name].ctypes.data,
+                                          self.expected_input_size)
 
-        if self.next_q:
-            # Fetch results
-            for name, index, _ in self.out_info:
-                working_tensors[name] = self.interpreter.get_tensor(index)
-        else:
-            # Fetch pointer to results
-            # Copy and convert to float
-            output = [t().astype(np.float32) for _,_,t in self.out_info]
+            # Make TPU available for next round
+            self.this_q.put(self)
 
-        # Make TPU available for next round
-        self.this_q.put(self)
+            if self.next_q:
+                # Fetch results
+                for name, index, _ in self.out_info:
+                    working_tensors[name] = self.interpreter.get_tensor(index)
+            else:
+                # Fetch pointer to results
+                # Copy and convert to float
+                output = [t().astype(np.float32) for _,_,t in self.out_info]
 
         with self.stats_lock:
             # Convert elapsed time to double precision ms
@@ -159,7 +162,7 @@ class DynamicInterpreter(object):
             self.exec_count[self.seg_idx] += 1
 
         # Return results
-        return self.next_q.get().invoke(working_tensors) if self.next_q else output
+        return self.next_q.get(timeout=MAX_WAIT_TIME).invoke(working_tensors) if self.next_q else output
 
     def __del__(self):
         # Print performance info
@@ -205,10 +208,10 @@ class DynamicPipeline(object):
         
         self.fname_list   = fname_list
         self.tpu_list     = tpu_list
-        self.interpreters = [[]  for i in range(seg_count)]
+        self.interpreters = [[]  for _ in fname_list]
 
         # Input queues for each segment; if we go over maxsize, something went wrong
-        self.queues = [queue.PriorityQueue(maxsize=self.max_pipeline_queue_length) for i in range(seg_count)]
+        self.queues = [queue.PriorityQueue(maxsize=self.max_pipeline_queue_length) for _ in fname_list]
 
         # Lock for internal reorganization
         self.balance_lock = threading.Lock()
@@ -231,6 +234,8 @@ class DynamicPipeline(object):
             self._init_interpreters()
 
     def _init_interpreters(self):
+        assert self.balance_lock.locked()
+
         # Set a Time To Live for balancing so we don't thrash
         self.balance_ttl  = len(self.tpu_list) * 3
         start_boot_time = time.perf_counter_ns()
@@ -253,8 +258,12 @@ class DynamicPipeline(object):
         with self.balance_lock:
             if not self.first_name:
                 self._init_interpreters()
+            fn = self.first_name
 
-        return self.queues[0].get().invoke({self.first_name: in_tensor})
+        # It's possible the interpreters will get deleted before we get() one,
+        # but that's a risk we'll take to drop the lock and not block. If it happens,
+        # we'll end up blocking until timeout or another process re-inits.
+        return self.queues[0].get(timeout=MAX_WAIT_TIME).invoke({fn: in_tensor})
 
 
     def _eval_timings(self, interpreter_counts):
@@ -389,6 +398,7 @@ class DynamicPipeline(object):
 
 
     def _rem_interpreter_from(self, interp_i):
+        assert self.balance_lock.locked()
         interp = self.queues[interp_i].get()
         self.interpreters[interp_i].remove(interp)
         return interp
@@ -406,17 +416,18 @@ class DynamicPipeline(object):
 
     def delete(self):
         # Kill interpreters. Maybe refresh later; maybe delete object.
+        # Hold lock so no more work can be enqueued
         with self.balance_lock:
+            # Empty interpreter lists
             # Empty interpreter queues
-            for q in self.queues:
-                while not q.empty():
+            for i_list, q in zip(self.interpreters, self.queues):
+                # Make sure we dequeue the expected number of items
+                for _ in i_list:
                     q.get()
 
-            # Empty interpreter lists
-            for i_list in self.interpreters:
                 i_list.clear()
 
-        self.first_name = None
+            self.first_name = None
 
 
 class TPURunner(object):
@@ -447,12 +458,13 @@ class TPURunner(object):
         self.last_check_time      = None
         self.printed_shape_map    = {}
 
+        self.runner_lock          = threading.Lock()
+
         self.watchdog_time        = None
         self.watchdog_shutdown    = False
         self.watchdog_thread      = threading.Thread(target=self._watchdog)
         self.watchdog_thread.start()
 
-        self.runner_lock          = threading.Lock()
         self.executor             = concurrent.futures.ThreadPoolExecutor(max_workers=32)
 
         logging.info(f"edgetpu version: {edgetpu.get_runtime_version()}")
@@ -483,13 +495,11 @@ class TPURunner(object):
     def _watchdog(self):
         self.watchdog_time = time.time()
         while not self.watchdog_shutdown:
-            if self.pipe and self.pipe.first_name is not None and \
-                time.time() - self.watchdog_time > self.max_idle_secs_before_recycle:
-                logging.warning("No work in {} seconds, watchdog shutting down TPUs.".format(self.max_idle_secs_before_recycle))
-                self.runner_lock.acquire(timeout=MAX_WAIT_TIME)
-                if self.pipe.first_name is not None:
+            with self.runner_lock:
+                if self.pipe and self.pipe.first_name is not None and \
+                   time.time() - self.watchdog_time > self.max_idle_secs_before_recycle:
+                    logging.info("No work in {} seconds, watchdog shutting down TPUs.".format(self.max_idle_secs_before_recycle))
                     self.pipe.delete()
-                self.runner_lock.release()
                 # Pipeline will reinitialize itself as needed
             time.sleep(self.watchdog_idle_secs)
 
@@ -668,6 +678,7 @@ class TPURunner(object):
         """
         error  = None
         now_ts = datetime.now()
+        assert self.runner_lock.locked()
         
         if not self.pipe:
             logging.debug("No pipe found. Recreating.")
@@ -744,12 +755,12 @@ class TPURunner(object):
     def _delete(self):
         # Close pipeline
         if self.pipe:
-            self.pipe.delete()
             self.pipe = None
 
     def pipeline_ok(self) -> bool:
         """ Check we have valid interpreters """
         with self.runner_lock:
+            self._periodic_check(options)
             return bool(self.pipe and any(self.pipe.interpreters))
 
     def process_image(self,
@@ -792,30 +803,30 @@ class TPURunner(object):
             if not pipe_ok:
                 return None, 0, error
 
+            # Grab a reference so we know it isn't deleted
+            pipe = self.pipe
+
         tiles = self._get_tiles(options, image)
 
         start_inference_time = time.perf_counter()
         all_objects = []
         if len(tiles) > 1:
             # Submit tile processing to thread pool
-            future_to_inference = {self.executor.submit(self.pipe.invoke, image): loc for image, loc in tiles}
+            future_to_inference = {self.executor.submit(pipe.invoke, image): loc for image, loc in tiles}
 
             # Wait for the results here
             for future in concurrent.futures.as_completed(future_to_inference):
                 self._rs_to_obj(future.result(), score_threshold, all_objects, future_to_inference[future])
         else:
-            self._rs_to_obj(self.pipe.invoke(tiles[0][0]), score_threshold, all_objects, tiles[0][1])
+            self._rs_to_obj(pipe.invoke(tiles[0][0]), score_threshold, all_objects, tiles[0][1])
         tot_inference_time = time.perf_counter() - start_inference_time
         
         # Convert to ms
         tot_inference_time = int(tot_inference_time * 1000)
 
-        # Remove duplicate objects
-        unique_indexes = self._non_max_suppression(all_objects, options.iou_threshold)
-
         # We got here, so the pipe must be relatively healthy.
         self.watchdog_time = time.time()
-        return ([all_objects[i] for i in unique_indexes], tot_inference_time, None)
+        return (all_objects, tot_inference_time, None)
 
 
     def _rs_to_obj(self, rs, score_threshold, all_objects, rs_loc):
@@ -1051,8 +1062,10 @@ class TPURunner(object):
         return output
 
         
-    def _non_max_suppression(self, objects: list, threshold: float) -> list:
+    def non_max_suppression(self, objects: list, threshold: float) -> list:
         """Returns a list of indexes of objects passing the NMS.
+
+        Can be optionally used on tiled results by advanced users.
 
         Args:
         objects: result candidates.
@@ -1138,8 +1151,10 @@ class TPURunner(object):
             fin_x = int(min(1.1 * i_width * resamp_y / i_height, resamp_x))
             fin_y = int(resamp_y)
 
-        # Chop & resize image piece
-        image = cv2.cvtColor(cv2.resize(image_full, (fin_x, fin_y), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
+        # Chop & resize image
+        if fin_x < i_width or fin_y < i_height:
+            image_full = cv2.resize(image_full, (fin_x, fin_y), interpolation=cv2.INTER_AREA)
+        image = cv2.cvtColor(image_full, cv2.COLOR_BGR2RGB)
         img_h, img_w, _ = image.shape
         logging.debug(f"Resizing to {img_w}x{img_h} for tiling ({m_width}x{m_height} tensor)")
 
@@ -1163,19 +1178,19 @@ class TPURunner(object):
         for x_off in range(0, max(img_w - m_width, 0) + tiles_x, step_x):
             for y_off in range(0, max(img_h - m_height, 0) + tiles_y, step_y):
                 # Adjust contrast on a per-chunk basis; we will likely be quantizing the image during scaling
-                cropped_arr = self._cv_autocontrast_scale_np(image, (x_off, y_off,
-                                                                     x_off + m_width,
-                                                                     y_off + m_height))
+                cropped_arr = self._autocontrast_scale_np(image, (x_off, y_off,
+                                                                  x_off + m_width,
+                                                                  y_off + m_height))
 
                 logging.debug("Resampled image tile {} at offset {}, {}".format(cropped_arr.shape, x_off, y_off))
                 resamp_info = (x_off, y_off, i_width/img_w, i_height/img_h)
 
                 # Cast and clip
-                tile_arr = np.empty(cropped_arr.shape, dtype=self.input_details['dtype'])
+                tile_arr = np.zeros(cropped_arr.shape, dtype=self.input_details['dtype'])
                 dinfo = np.iinfo(self.input_details['dtype'])
                 np.clip(cropped_arr, dinfo.min, dinfo.max, out=tile_arr, casting='unsafe')
 
-                # Ensure this is tensor-ready
+                # Ensure this is the tensor-ready size
                 tile_height, tile_width, tile_c = tile_arr.shape
                 if tile_width != m_width or tile_height != m_height:
                     tile_arr = np.pad(tile_arr, ((0, m_height - tile_height), (0, m_width - tile_width), (0, 0)))
@@ -1186,11 +1201,7 @@ class TPURunner(object):
                 #Image.fromarray((tiles[-1][0]).astype(np.uint8)).save(f"test_{x_off}_{y_off}.png")
         return tiles
 
-    def _pil_autocontrast_scale_np(self, image, crop_dim):
-        image_chunk = ImageOps.autocontrast(image.crop(crop_dim), 1)
-        return np.asarray(image_chunk, np.float32) * self.input_scale + self.input_zero
-
-    def _cv_autocontrast_scale_np(self, image, crop_dim):
+    def _autocontrast_scale_np(self, image, crop_dim):
         cropped_img = image[crop_dim[1]:crop_dim[3],crop_dim[0]:crop_dim[2]]
 
         # Convert to gret for histogram
@@ -1208,7 +1219,7 @@ class TPURunner(object):
     
         # Locate points to clip
         maximum = accumulator[-1]
-        clip_hist_percent = 20 # == 20% pixels outside nominal input tensor range
+        clip_hist_percent = 2.0 # == 2% pixels outside nominal input tensor range
         clip_hist_percent *= (maximum/100.0)
         clip_hist_percent /= 2.0
     
