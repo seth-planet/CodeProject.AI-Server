@@ -96,34 +96,35 @@ class DynamicInterpreter(object):
     def start(self, seg_idx: int, fbytes: bytes):
         logging.info(f"Loading {self.tpu_name}: {self.fname_list[seg_idx]}")
 
-        try:
-            self.interpreter = edgetpu.make_interpreter(fbytes, delegate=self.delegate)
-        except Exception as in_ex:
-            # If we fail to create even one of the interpreters then fail all. 
-            # Throw exception and caller can try to recreate without the TPU.
-            # An option here is to remove the failed TPU from the list
-            # of TPUs and try the others. Maybe there's paired PCI cards
-            # and a USB, and the USB is failing?
-            logging.warning(f"Unable to create interpreter for TPU {self.tpu_name}: {in_ex}")
-            raise TPUException(self.tpu_name)
+        with self.output_lock:
+            try:
+                self.interpreter = edgetpu.make_interpreter(fbytes, delegate=self.delegate)
+            except Exception as in_ex:
+                # If we fail to create even one of the interpreters then fail all. 
+                # Throw exception and caller can try to recreate without the TPU.
+                # An option here is to remove the failed TPU from the list
+                # of TPUs and try the others. Maybe there's paired PCI cards
+                # and a USB, and the USB is failing?
+                logging.warning(f"Unable to create interpreter for TPU {self.tpu_name}: {in_ex}")
+                raise TPUException(self.tpu_name)
 
-        self.interpreter.allocate_tensors()
-        self.input_details = self.interpreter.get_input_details()
-        self.output_details = self.interpreter.get_output_details()
+            self.interpreter.allocate_tensors()
+            self.input_details = self.interpreter.get_input_details()
+            self.output_details = self.interpreter.get_output_details()
 
-        # Setup local interpreter vars
-        self.seg_idx = seg_idx
-        self.this_q = self.queues[seg_idx]
-        self.next_q = None
-        if len(self.queues) > seg_idx+1:
-            self.next_q = self.queues[seg_idx+1]
-            
-        self.in_info  = [(d['name'], d['index'], self.interpreter.tensor(d['index'])) for d in self.input_details ]
-        self.out_info = [(d['name'], d['index'], self.interpreter.tensor(d['index'])) for d in self.output_details]
-        self.first_in_name, _, _ = self.in_info.pop(0)
+            # Setup local interpreter vars
+            self.seg_idx = seg_idx
+            self.this_q = self.queues[seg_idx]
+            self.next_q = None
+            if len(self.queues) > seg_idx+1:
+                self.next_q = self.queues[seg_idx+1]
+                
+            self.in_info  = [(d['name'], d['index'], self.interpreter.tensor(d['index'])) for d in self.input_details ]
+            self.out_info = [(d['name'], d['index'], self.interpreter.tensor(d['index'])) for d in self.output_details]
+            self.first_in_name, _, _ = self.in_info.pop(0)
 
-        self.expected_input_size = np.prod(self.input_details[0]['shape'])
-        self.interpreter_handle = self.interpreter._native_handle()
+            self.expected_input_size = np.prod(self.input_details[0]['shape'])
+            self.interpreter_handle = self.interpreter._native_handle()
 
         # Add self to priority queue
         self.this_q.put(self)
@@ -143,10 +144,15 @@ class DynamicInterpreter(object):
                                           working_tensors[self.first_in_name].ctypes.data,
                                           self.expected_input_size)
 
-            # Make TPU available for next round
-            self.this_q.put(self)
+            # Make TPU available to begin next round
+            this_q.put(self)
 
-            if self.next_q:
+            # Save locally in case it is moved to a different queue
+            this_q = self.this_q
+            next_q = self.next_q
+            seg_idx = self.seg_idx
+
+            if next_q:
                 # Fetch results
                 for name, index, _ in self.out_info:
                     working_tensors[name] = self.interpreter.get_tensor(index)
@@ -157,12 +163,12 @@ class DynamicInterpreter(object):
 
         with self.stats_lock:
             # Convert elapsed time to double precision ms
-            self.timings[self.seg_idx] += (time.perf_counter_ns() - start_inference_time) / (1000.0 * 1000.0)
-            self.q_len[self.seg_idx] += self.this_q.qsize()
-            self.exec_count[self.seg_idx] += 1
+            self.timings[seg_idx] += (time.perf_counter_ns() - start_inference_time) / (1000.0 * 1000.0)
+            self.q_len[seg_idx] += this_q.qsize()
+            self.exec_count[seg_idx] += 1
 
         # Return results
-        return self.next_q.get(timeout=MAX_WAIT_TIME).invoke(working_tensors) if self.next_q else output
+        return next_q.get(timeout=MAX_WAIT_TIME).invoke(working_tensors) if next_q else output
 
     def __del__(self):
         # Print performance info
@@ -553,6 +559,9 @@ class TPURunner(object):
 
         # If TPU found then default is single TPU model file (no segments)
         if not any(options.tpu_segments_lists) or device_count == 1:
+            if not os.path.exists(options.model_tpu_file):
+                logging.warning(f"Missing TPU file: {options.model_tpu_file}; falling back to CPU")
+                return self._get_model_filenames(options, [])
             return [options.model_tpu_file]
             
         # We have a list of segment files
@@ -562,14 +571,19 @@ class TPURunner(object):
             # so best performance above that can probably be had by extrapolation.
             device_count = min(device_count, 8)
             if device_count in options.tpu_segments_lists:
-                return options.tpu_segments_lists[device_count]
+                seg_fnames = options.tpu_segments_lists[device_count]
+                for fn in seg_fnames:
+                    if not os.path.exists(fn):
+                        logging.warning(f"Missing TPU segment file: {fn}; falling back to single segment")
+                        return self._get_model_filenames(options, (tpu_list[0],))
+                return seg_fnames
         else:
             # Only one list of segments; use it regardless of even match to TPU count
             if len(options.tpu_segments_lists) <= device_count:
                 return options.tpu_segments_lists
 
         # Couldn't find a good fit, use single segment
-        return [options.model_tpu_file]
+        return self._get_model_filenames(options, (tpu_list[0],))
 
 
     # Should be called while holding runner_lock (if called at run time)
@@ -648,7 +662,7 @@ class TPURunner(object):
 
         # Reduce OpenCV usage of threads
         if os.cpu_count() is not None:
-            cv2.setNumThreads(os.cpu_count())
+            cv2.setNumThreads(min(8, os.cpu_count()))
 
         return (self.device_type, error)
 
@@ -698,25 +712,24 @@ class TPURunner(object):
         self.last_check_time = now_ts
         
         # Check temperatures
-        if check_temp:
-            if self.temp_fname_format != None and self.pipe:
-                msg = "TPU {} is {}C and will likely be throttled"
-                temp_arr = []
-                for i in range(len(self.pipe.tpu_list)):
-                    if os.path.exists(self.temp_fname_format.format(i)):
-                        with open(self.temp_fname_format.format(i), "r") as fp:
-                            # Convert from millidegree C to degree C
-                            temp = int(fp.read()) // 1000
-                            temp_arr.append(temp)            
-                            if self.warn_temperature_thresh_C <= temp:
-                                logging.warning(msg.format(i, temp))
-                if any(temp_arr):
-                    logging.debug("Temperatures: {} avg; {} max; {} total".format(
-                                                    sum(temp_arr) // len(temp_arr),
-                                                    max(temp_arr),
-                                                    len(temp_arr)))
-                else:
-                    logging.warning("Unable to find temperatures!")
+        if check_temp and self.temp_fname_format != None and self.pipe:
+            msg = "TPU {} is {}C and will likely be throttled"
+            temp_arr = []
+            for i in range(len(self.pipe.tpu_list)):
+                if os.path.exists(self.temp_fname_format.format(i)):
+                    with open(self.temp_fname_format.format(i), "r") as fp:
+                        # Convert from millidegree C to degree C
+                        temp = int(fp.read()) // 1000
+                        temp_arr.append(temp)            
+                        if self.warn_temperature_thresh_C <= temp:
+                            logging.warning(msg.format(i, temp))
+            if any(temp_arr):
+                logging.debug("Temperatures: {} avg; {} max; {} total".format(
+                                                sum(temp_arr) // len(temp_arr),
+                                                max(temp_arr),
+                                                len(temp_arr)))
+            else:
+                logging.warning("Unable to find temperatures!")
 
         # Once an hour, refresh the pipe
         if (force or check_refresh) and self.pipe:
