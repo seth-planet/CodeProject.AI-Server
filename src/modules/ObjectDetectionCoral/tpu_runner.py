@@ -144,13 +144,13 @@ class DynamicInterpreter(object):
                                           working_tensors[self.first_in_name].ctypes.data,
                                           self.expected_input_size)
 
-            # Make TPU available to begin next round
-            this_q.put(self)
-
             # Save locally in case it is moved to a different queue
             this_q = self.this_q
             next_q = self.next_q
             seg_idx = self.seg_idx
+
+            # Make TPU available to begin next round
+            this_q.put(self)
 
             if next_q:
                 # Fetch results
