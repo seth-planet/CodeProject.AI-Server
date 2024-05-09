@@ -20,14 +20,42 @@ fn_list = [
     #'yolov5s-int8',
     #'yolov5m-int8',
     #'yolov5l-int8',
+    #'yolov8n_352_608px',
+    'yolov8s_352_608px',
+    'yolov8m_352_608px',
+    'yolov8l_352_608px',
+    #'yolov8n_384_608px',
+    'yolov8s_384_608px',
+    'yolov8m_384_608px',
+    'yolov8l_384_608px',
+    #'yolov8n_384_640px',
+    'yolov8s_384_640px',
+    'yolov8m_384_640px',
+    'yolov8l_384_640px',
     #'yolov8n_416_640px', # lg 1st seg
-    #'yolov8s_416_640px', # lg 1st seg
-    #'yolov8m_416_640px', # lg 1st seg
-    #'yolov8l_416_640px', # lg 1st seg
+    'yolov8s_416_640px', # lg 1st seg
+    'yolov8m_416_640px', # lg 1st seg
+    'yolov8l_416_640px', # lg 1st seg
+    #'yolov8n_full_integer_quant', # 448px, but YOLO v8.1
+    'yolov8s_full_integer_quant',
+    'yolov8m_full_integer_quant',
+    'yolov8l_full_integer_quant',
+    #'yolov8n_448px',
+    'yolov8s_448px',
+    'yolov8m_448px',
+    'yolov8l_448px',
+    #'yolov8n_480px',
+    'yolov8s_480px',
+    'yolov8m_480px',
+    'yolov8l_480px',
+    #'yolov8n_512px',
+    'yolov8s_512px',
+    'yolov8m_512px',
+    'yolov8l_512px',
     #'yolov8n_640px',
-    #'yolov8s_640px',
-    #'yolov8m_640px', # lg 1st seg
-    #'yolov8l_640px', # lg 1st seg
+    'yolov8s_640px',
+    'yolov8m_640px', # lg 1st seg
+    'yolov8l_640px', # lg 1st seg
     'ipcam-general-v8']
 
 custom_args = {
@@ -182,7 +210,7 @@ custom_args = {
         8: ["--partition_search_step","5"]}}#'''
    
 seg_dir = "/media/seth/FAT_THUMB/all_segments/"
-seg_types = ['', '2x_first_seg/', '15x_first_seg/', '166x_first_seg/', '3x_first_seg/', '4x_first_seg/', 'inc_seg/', 'dumb/']
+seg_types = ['', '2x_first_seg/', '15x_first_seg/', '3x_first_seg/', '4x_first_seg/', '15x_last_seg/', '2x_last_seg/', 'dumb/']
 
 
 def seg_exists(filename, segment_type, segment_count):
@@ -195,9 +223,9 @@ def seg_exists(filename, segment_type, segment_count):
         seg_list = [seg_dir+segment_type+filename+'_segment_{}_of_{}_edgetpu.tflite'.format(i, segment_count) for i in range(segment_count)]
     return (seg_list, any([True for s in seg_list if not os.path.exists(s)]))
 
-MAX_TPU_COUNT = 4
+MAX_TPU_COUNT = 5
 
-'''
+#'''
 # Generate segment files
 for sn in range(1,MAX_TPU_COUNT+1):
     for fn in fn_list:
@@ -281,7 +309,11 @@ for sn in range(1,MAX_TPU_COUNT+1):
                     partition_with_profiling_dir = "libcoral/tools.last15"
                 elif '2x_last_seg' in seg_type:
                     partition_with_profiling_dir = "libcoral/tools.last2"
-                elif 'inc_seg' == seg_type:
+                elif '125x_last_inc_seg/' == seg_type:
+                    partition_with_profiling_dir = "libcoral/tools.last125_inc_seg"
+                elif '2x_first_125x_last_inc_seg/' == seg_type:
+                    partition_with_profiling_dir = "libcoral/tools.2last125_inc_seg"
+                elif 'inc_seg/' == seg_type:
                     partition_with_profiling_dir = "libcoral/tools.inc_seg"
                 else:
                     partition_with_profiling_dir = "libcoral/tools.orig"
@@ -298,7 +330,7 @@ for sn in range(1,MAX_TPU_COUNT+1):
             subprocess.run(cmd)#'''
            
 
-seg_types += ['133x_first_seg/', '15x_last_seg/', '2x_last_seg/']
+seg_types += ['133x_first_seg/', '166x_first_seg/', 'inc_seg/', '125x_last_inc_seg/', '2x_first_125x_last_inc_seg/']
 
 # Test timings
 fin_timings = {}
@@ -308,11 +340,14 @@ for fn in fn_list:
     fin_timings[fn] = {}
     fin_fnames[fn] = {}
 
-    for num_tpus in range(2,MAX_TPU_COUNT+1):
+    for num_tpus in range(1,MAX_TPU_COUNT+1):
 
         for seg_type in seg_types:
             max_seg = 0
             for sn in range(1,num_tpus+1):
+                # No need to run many slow single TPU tests, just one
+                if sn == 1 and seg_type != '':
+                    continue
 
                 # Test against orig code
                 exe_file = "/home/seth/CodeProject.AI-Server/src/modules/ObjectDetectionCoral/objectdetection_coral_multitpu.py"
@@ -324,17 +359,32 @@ for fn in fn_list:
                     continue
                 max_seg = sn
 
-                cmd = ["python3",exe_file,"--model"] + \
+                cmd = ["python3.9",exe_file,"--model"] + \
                       seg_list + ["--labels","coral/pycoral/test_data/coco_labels.txt","--input","/home/seth/coral/pycoral/test_data/grace_hopper.bmp",
-                      "--count","2000","--num-tpus",str(num_tpus)]
+                      "--count","4000","--num-tpus",str(num_tpus)]
                 print(cmd)
-                c = subprocess.run(cmd, check=True, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                # Clock runtime
+                #start_time = time.perf_counter()
+                #subprocess.run(cmd)
+                #ms_time = 1000 * (time.perf_counter() - start_time) / 4000 # ms * total time / iterations
+
+                # Last quarter runtime
+                try:
+                    c = subprocess.run(cmd, check=True, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600*2)
+                except subprocess.TimeoutExpired:
+                    print("Timed out!")
+                    continue
                 print(c.stdout)
                 print(c.stderr)
                 ms_time = float(re.compile(r'threads; ([\d\.]+)ms ea').findall(c.stderr)[0])
+                
                 timings.append((ms_time, num_tpus, fn, seg_type, sn))
+                subprocess.run(['uptime'])
 
         timings = sorted(timings, key=lambda t: t[0])
+        if not any(timings):
+            continue
 
         # Print the top three
         print(f"TIMINGS FOR {num_tpus} TPUs AND {fn} MODEL:")
@@ -344,12 +394,11 @@ for fn in fn_list:
         # Get best segments, but
         # Skip if it's not 'orig_code' and > 1 segment
         t = [t for t in timings if t[3] != 'orig_code'][0]
+        fin_timings[fn][num_tpus] = timings[0]
         if t[4] == 1:
             continue
 
         # Add segment to the final list 
-        fin_timings[fn][num_tpus] = timings[0]
-
         # Copy best to local dir
         seg_list, _ = seg_exists(t[2], t[3], t[4])
         fin_fnames[fn][num_tpus] = []
@@ -361,8 +410,11 @@ for fn in fn_list:
 
         # Create archive for this model / TPU count
         if any(fin_fnames[fn][num_tpus]):
-            cmd = ['zip', '-9', f'objectdetection-{fn}-{num_tpus}-edgetpu.zip'] + fin_fnames[fn][num_tpus]
+            zip_name = f'objectdetection-{fn}-{num_tpus}-edgetpu.zip'
+            cmd = ['zip', '-9', zip_name] + fin_fnames[fn][num_tpus]
             print(cmd)
+            if os.path.exists(zip_name):
+                os.unlink(zip_name)
             subprocess.run(cmd)
 
 print(fin_timings)
@@ -371,7 +423,16 @@ print(fin_fnames)
 # Pretty print all of the segments we've timed and selected
 for fn, v in fin_fnames.items():
     print("             '%s': {" % fn)
+    for tpu_count, timing in fin_timings[fn].items():
+        if tpu_count in v:
+            seg_str = f"{len(v[tpu_count])} segments"
+        else:
+            seg_str = "1 segment"
+
+        fps = 1000.0 / timing[0]
+
+        print(f"                 # {timing[0]:6.1f} ms per inference ({fps:3.1f} FPS) for {tpu_count} TPUs using {seg_str}")
+
     for tpu_count, out_fnames in v.items():
-        print(f"                 # {fin_timings[fn][tpu_count][0]:6.1f} ms per inference")
         print(f"                 {tpu_count}: "+str(out_fnames)+",")
     print("             },")
