@@ -226,7 +226,7 @@ namespace CodeProject.AI.Server.Models
             // Shared cache folder
             // return _moduleOptions.DownloadedModelsPackagesDirPath;
 
-            // Individual cache folder per module. ** This is what the installers use!
+            // Individual cache folder per module. **This is what the installers use!**
             return Path.Combine(_moduleOptions.DownloadedModulePackagesDirPath!, moduleId);
         }
 
@@ -269,7 +269,7 @@ namespace CodeProject.AI.Server.Models
             downloadDirPath = Path.Combine(downloadDirPath, moduleId, filename);
 
             // Console.WriteLine("Setting ModuleStatusType.Downloading");
-            _logger.LogInformation($"Downloading module '{filename}' to '{downloadDirPath}'");
+            _logger.LogInformation($"Downloading model '{filename}' to '{downloadDirPath}'");
 
             bool downloaded = false;
             string error = string.Empty;
@@ -324,8 +324,6 @@ namespace CodeProject.AI.Server.Models
         {
             if (string.IsNullOrWhiteSpace(moduleId))
                 return (false, "No module ID provided");
-
-            // moduleId = moduleId.ToLower();
 
             _logger.LogInformation($"Preparing to delete model package '{filename}' for module {moduleId}");
 

@@ -14,28 +14,32 @@ from llama_cpp import ChatCompletionRequestSystemMessage, \
 
 class LlamaChat:
 
-    def __init__(self, repo_id: str, fileglob:str, filename:str, model_dir:str, n_ctx: int = 0,
-                 verbose: bool = True) -> None:
+    def __init__(self, repo_id: str, fileglob:str, filename:str, model_dir:str, 
+                 n_ctx: int = 0, n_gpu_layers = -1, verbose: bool = True) -> None:
 
         try:
             # This will use the model we've already downloaded and cached locally
             self.model_path = os.path.join(model_dir, filename)
             self.llm = Llama(model_path=self.model_path, 
-                                n_ctx=n_ctx,
-                                n_gpu_layers=-1,
-                                verbose=verbose)
+                             n_ctx=n_ctx,
+                             n_gpu_layers=n_gpu_layers,
+                             verbose=verbose)
         except:
             try:
                 # This will download the model from the repo and cache it locally
                 # Handy if we didn't download during install
                 self.model_path = os.path.join(model_dir, fileglob)
-                self.llm = Llama.from_pretrained(repo_id=repo_id,
-                                                filename=fileglob,
-                                                n_ctx=n_ctx,
-                                                n_gpu_layers=-1,
-                                                verbose=verbose,
-                                                cache_dir=model_dir,
-                                                chat_format="llama-2")
+                self.llm        = Llama.from_pretrained(repo_id=repo_id,
+                                                        filename=fileglob,
+                                                        n_ctx=n_ctx,
+                                                        n_gpu_layers=n_gpu_layers,
+                                                        verbose=verbose,
+                                                        cache_dir=model_dir,
+                                                        chat_format="llama-2")
+                
+                # get the relative path to the model file from the model itself
+                self.model_path = os.path.relpath(self.llm.model_path)
+
             except:
                 self.llm        = None
                 self.model_path = None
